@@ -59,6 +59,8 @@ LOG_BUFFER = collections.deque(maxlen=500)
 LOG_SEQ = 0
 SENTENCE_END_CHARS = "，。！？；,.!?;:"
 MLX_INFERENCE_LOCK = threading.Lock()
+TTS_SEGMENT_WALL_TIMEOUT_S = 8.0
+TTS_SEGMENT_AUDIO_TIMEOUT_S = 6.0
 
 
 def append_log(message: str):
@@ -492,6 +494,7 @@ class RealtimeSession:
             tts_first_chunk_ms: Optional[float] = None
             segment_wave_chunks: List[np.ndarray] = []
             sample_rate: Optional[int] = None
+            streamed_audio_s = 0.0
 
             with MLX_INFERENCE_LOCK:
                 for chunk_index, (waveform_chunk, sample_rate, is_final_chunk) in enumerate(
@@ -504,6 +507,7 @@ class RealtimeSession:
                     if self.first_audio_ms is None:
                         self.first_audio_ms = (now - self.created_at) * 1000
                     segment_wave_chunks.append(waveform_chunk)
+                    streamed_audio_s += len(waveform_chunk) / sample_rate
                     self.emit_event(
                         {
                             "type": "audio_chunk",
@@ -516,6 +520,14 @@ class RealtimeSession:
                             "audio_pcm_base64": encode_pcm_base64(waveform_chunk),
                         }
                     )
+                    if is_final_chunk:
+                        break
+                    if streamed_audio_s >= TTS_SEGMENT_AUDIO_TIMEOUT_S or (now - tts_t0) >= TTS_SEGMENT_WALL_TIMEOUT_S:
+                        append_log(
+                            f"[rt-tts-guard] cut segment={self.segment_index} "
+                            f"audio={streamed_audio_s:.2f}s wall={(now - tts_t0):.2f}s text={english_unit!r}"
+                        )
+                        break
 
             if not segment_wave_chunks or sample_rate is None:
                 continue
