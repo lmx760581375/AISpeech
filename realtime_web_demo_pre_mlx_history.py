@@ -19,7 +19,6 @@ import hashlib
 import io
 import json
 import mimetypes
-import multiprocessing as mp
 import os
 import queue
 import re
@@ -60,176 +59,6 @@ LOG_BUFFER = collections.deque(maxlen=500)
 LOG_SEQ = 0
 SENTENCE_END_CHARS = "，。！？；,.!?;:"
 MLX_INFERENCE_LOCK = threading.Lock()
-
-
-def _tts_process_main(model_id: str, streaming_interval_s: float, request_queue, response_queue):
-    from demo_pre_mlx_history import TTSModule
-
-    tts = TTSModule(model_path=model_id)
-    tts.streaming_interval_s = streaming_interval_s
-    active_ref_audio_path = None
-    active_ref_text = None
-    response_queue.put({"type": "ready"})
-
-    while True:
-        request = request_queue.get()
-        if request is None:
-            break
-
-        request_id = request.get("request_id")
-        try:
-            ref_audio_path = request["ref_audio_path"]
-            ref_text = request.get("ref_text") or ""
-            if ref_audio_path != active_ref_audio_path or ref_text != active_ref_text:
-                tts.create_voice_reference(ref_audio_path, ref_text)
-                active_ref_audio_path = ref_audio_path
-                active_ref_text = ref_text
-
-            for waveform, sample_rate, is_final_chunk in tts.synthesize_stream(
-                request["english_text"],
-                ref_audio_path,
-                ref_text,
-            ):
-                response_queue.put(
-                    {
-                        "request_id": request_id,
-                        "type": "chunk",
-                        "audio_pcm": np.asarray(waveform, dtype=np.float32).tobytes(),
-                        "sample_rate": sample_rate,
-                        "is_final_chunk": bool(is_final_chunk),
-                    }
-                )
-            response_queue.put({"request_id": request_id, "type": "done"})
-        except Exception as exc:
-            response_queue.put(
-                {
-                    "request_id": request_id,
-                    "type": "error",
-                    "message": str(exc),
-                    "traceback": traceback.format_exc(),
-                }
-            )
-
-
-class IsolatedTTSWorker:
-    def __init__(
-        self,
-        model_id: str,
-        streaming_interval_s: float,
-        first_chunk_timeout_s: float = 6.0,
-        idle_timeout_s: float = 4.0,
-        total_timeout_s: float = 20.0,
-    ):
-        self.model_id = model_id
-        self.streaming_interval_s = streaming_interval_s
-        self.first_chunk_timeout_s = first_chunk_timeout_s
-        self.idle_timeout_s = idle_timeout_s
-        self.total_timeout_s = total_timeout_s
-        self._ctx = mp.get_context("spawn")
-        self._request_queue = None
-        self._response_queue = None
-        self._process = None
-        self._call_lock = threading.Lock()
-
-    def _start(self):
-        self._request_queue = self._ctx.Queue()
-        self._response_queue = self._ctx.Queue()
-        self._process = self._ctx.Process(
-            target=_tts_process_main,
-            args=(self.model_id, self.streaming_interval_s, self._request_queue, self._response_queue),
-            daemon=True,
-        )
-        self._process.start()
-        append_log(f"[rt-tts] Started isolated TTS worker pid={self._process.pid}.")
-        self._wait_until_ready()
-
-    def _wait_until_ready(self):
-        start = time.time()
-        while True:
-            if self._process is None or not self._process.is_alive():
-                raise RuntimeError("isolated TTS worker exited during startup")
-            try:
-                response = self._response_queue.get(timeout=0.2)
-            except queue.Empty:
-                if (time.time() - start) > 20.0:
-                    self._stop()
-                    raise TimeoutError("isolated TTS worker startup timeout")
-                continue
-            if response.get("type") == "ready":
-                return
-
-    def _stop(self):
-        if self._process is not None and self._process.is_alive():
-            self._process.terminate()
-            self._process.join(timeout=1.0)
-        self._process = None
-        self._request_queue = None
-        self._response_queue = None
-
-    def close(self):
-        self._stop()
-
-    def _restart(self, reason: str):
-        append_log(f"[rt-tts] Restarting isolated TTS worker: {reason}")
-        self._stop()
-        self._start()
-
-    def _ensure_started(self):
-        if self._process is None or not self._process.is_alive():
-            self._start()
-
-    def synthesize_stream(self, english_text: str, ref_audio_path: str, ref_text: str):
-        with self._call_lock:
-            self._ensure_started()
-            request_id = uuid.uuid4().hex
-            self._request_queue.put(
-                {
-                    "request_id": request_id,
-                    "english_text": english_text,
-                    "ref_audio_path": ref_audio_path,
-                    "ref_text": ref_text,
-                }
-            )
-
-            start_time = time.time()
-            last_message_time = start_time
-            got_chunk = False
-
-            while True:
-                timeout_s = self.idle_timeout_s if got_chunk else self.first_chunk_timeout_s
-                try:
-                    response = self._response_queue.get(timeout=0.2)
-                except queue.Empty:
-                    now = time.time()
-                    if self._process is None or not self._process.is_alive():
-                        self._restart("worker exited unexpectedly")
-                        raise RuntimeError("isolated TTS worker exited")
-                    if (now - start_time) > self.total_timeout_s:
-                        self._restart(f"total timeout on text={english_text!r}")
-                        raise TimeoutError("TTS total timeout")
-                    if (now - last_message_time) > timeout_s:
-                        self._restart(f"idle timeout on text={english_text!r}")
-                        raise TimeoutError("TTS idle timeout")
-                    continue
-
-                if response.get("request_id") != request_id:
-                    continue
-
-                last_message_time = time.time()
-                response_type = response.get("type")
-                if response_type == "chunk":
-                    got_chunk = True
-                    yield (
-                        np.frombuffer(response["audio_pcm"], dtype=np.float32).copy(),
-                        int(response["sample_rate"]),
-                        bool(response["is_final_chunk"]),
-                    )
-                    continue
-                if response_type == "done":
-                    return
-                if response_type == "error":
-                    self._restart(f"worker error on text={english_text!r}")
-                    raise RuntimeError(response.get("message") or "isolated TTS worker error")
 
 
 def append_log(message: str):
@@ -561,6 +390,13 @@ class AudioChunkTask:
     sample_rate: int
 
 
+@dataclass
+class CommittedTextTask:
+    text: str
+    asr_ms: float
+    enqueued_at: float
+
+
 class RealtimeSession:
     _INPUT_DONE = object()
     _TEXT_DONE = object()
@@ -591,10 +427,6 @@ class RealtimeSession:
         self.stop_event = threading.Event()
         self.committer = StableChunkCommitter()
         self.sentence_accumulator = RealtimeSentenceAccumulator()
-        self.tts_worker = IsolatedTTSWorker(
-            model_id=self.translator.tts.model_id,
-            streaming_interval_s=self.translator.tts.streaming_interval_s,
-        )
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
@@ -661,28 +493,29 @@ class RealtimeSession:
             segment_wave_chunks: List[np.ndarray] = []
             sample_rate: Optional[int] = None
 
-            for chunk_index, (waveform_chunk, sample_rate, is_final_chunk) in enumerate(
-                self.tts_worker.synthesize_stream(english_unit, self.ref_audio_path, self.ref_text),
-                start=1,
-            ):
-                now = time.time()
-                if tts_first_chunk_ms is None:
-                    tts_first_chunk_ms = (now - tts_t0) * 1000
-                if self.first_audio_ms is None:
-                    self.first_audio_ms = (now - self.created_at) * 1000
-                segment_wave_chunks.append(waveform_chunk)
-                self.emit_event(
-                    {
-                        "type": "audio_chunk",
-                        "segment_index": self.segment_index,
-                        "chunk_index": chunk_index,
-                        "sample_rate": sample_rate,
-                        "is_final_chunk": bool(is_final_chunk),
-                        "first_audio_ms": self.first_audio_ms,
-                        "tts_first_chunk_ms": tts_first_chunk_ms,
-                        "audio_pcm_base64": encode_pcm_base64(waveform_chunk),
-                    }
-                )
+            with MLX_INFERENCE_LOCK:
+                for chunk_index, (waveform_chunk, sample_rate, is_final_chunk) in enumerate(
+                    self.translator.tts.synthesize_stream(english_unit, self.ref_audio_path, self.ref_text),
+                    start=1,
+                ):
+                    now = time.time()
+                    if tts_first_chunk_ms is None:
+                        tts_first_chunk_ms = (now - tts_t0) * 1000
+                    if self.first_audio_ms is None:
+                        self.first_audio_ms = (now - self.created_at) * 1000
+                    segment_wave_chunks.append(waveform_chunk)
+                    self.emit_event(
+                        {
+                            "type": "audio_chunk",
+                            "segment_index": self.segment_index,
+                            "chunk_index": chunk_index,
+                            "sample_rate": sample_rate,
+                            "is_final_chunk": bool(is_final_chunk),
+                            "first_audio_ms": self.first_audio_ms,
+                            "tts_first_chunk_ms": tts_first_chunk_ms,
+                            "audio_pcm_base64": encode_pcm_base64(waveform_chunk),
+                        }
+                    )
 
             if not segment_wave_chunks or sample_rate is None:
                 continue
@@ -772,13 +605,13 @@ class RealtimeSession:
                 )
                 for chinese_text in self.committer.ingest(partial_text):
                     for sentence_text, sentence_asr_ms in self.sentence_accumulator.feed(chinese_text, asr_ms):
-                        self.text_queue.put((sentence_text, sentence_asr_ms))
+                        self.text_queue.put(CommittedTextTask(sentence_text, sentence_asr_ms, time.time()))
 
             for chinese_text in self.committer.finalize():
                 for sentence_text, sentence_asr_ms in self.sentence_accumulator.feed(chinese_text, 0.0):
-                    self.text_queue.put((sentence_text, sentence_asr_ms))
+                    self.text_queue.put(CommittedTextTask(sentence_text, sentence_asr_ms, time.time()))
             for sentence_text, sentence_asr_ms in self.sentence_accumulator.finalize():
-                self.text_queue.put((sentence_text, sentence_asr_ms))
+                self.text_queue.put(CommittedTextTask(sentence_text, sentence_asr_ms, time.time()))
         except Exception as exc:
             self._record_error("Realtime ASR worker exception", exc)
         finally:
@@ -792,10 +625,12 @@ class RealtimeSession:
                     break
                 if self.stop_event.is_set():
                     continue
+                assert isinstance(item, CommittedTextTask)
                 while self.input_queue.qsize() > 2 and not self.stop_event.is_set():
+                    if (time.time() - item.enqueued_at) >= 0.8:
+                        break
                     time.sleep(0.05)
-                chinese_text, asr_ms = item
-                self._process_committed_text(chinese_text, asr_ms)
+                self._process_committed_text(item.text, item.asr_ms)
         except Exception as exc:
             self._record_error("Realtime TTS worker exception", exc)
 
@@ -834,7 +669,6 @@ class RealtimeSession:
         except Exception as exc:
             self._record_error("Realtime session exception", exc)
         finally:
-            self.tts_worker.close()
             self.done = True
 
 
