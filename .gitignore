@@ -1,0 +1,23 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Local tool state
+.cache/
+.claude/
+
+# Downloaded / generated model artifacts
+models/
+mlx_models/
+
+# Runtime outputs
+web_runs/
+bench_outputs/
+output_english.wav
+test_tts_output.wav
+test_tts_short.wav
+
+# Local environment files
+.env
+.venv/
+venv/

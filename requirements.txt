@@ -1,0 +1,18 @@
+# ASR
+lightning-whisper-mlx
+
+# TTS (MLX Qwen3-TTS)
+mlx-audio
+mlx-lm
+soundfile
+
+# MT via ollama
+ollama
+
+# Audio I/O
+pyaudio
+webrtcvad
+
+# Utils
+numpy
+torch

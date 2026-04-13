@@ -1,0 +1,971 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Simultaneous Translation Demo</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --line: #d8dee9;
+      --ink: #18212f;
+      --muted: #5f6b7a;
+      --accent: #0f766e;
+      --accent-2: #b45309;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 24px 16px 40px;
+    }
+    h1, h2 { margin: 0 0 12px; }
+    p { margin: 0; color: var(--muted); }
+    .grid {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 16px;
+      align-items: start;
+      margin-top: 18px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .stack { display: grid; gap: 12px; }
+    .field { display: grid; gap: 6px; }
+    label { font-size: 14px; font-weight: 600; }
+    input[type="file"], textarea, button {
+      width: 100%;
+      font: inherit;
+    }
+    textarea {
+      min-height: 96px;
+      resize: vertical;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+    button {
+      border: 1px solid var(--ink);
+      background: var(--ink);
+      color: #fff;
+      border-radius: 8px;
+      padding: 12px 14px;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: #fff;
+      color: var(--ink);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .hint { font-size: 13px; color: var(--muted); }
+    .row2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .mode-toggle button.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    .voice-card {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      background:
+        radial-gradient(circle at top right, rgba(15, 118, 110, 0.12), transparent 38%),
+        linear-gradient(135deg, #fff, #f4f8ff);
+    }
+    .voice-card.empty {
+      color: var(--muted);
+      background: #fbfcff;
+    }
+    .voice-card-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      font-size: 16px;
+    }
+    .voice-card-meta {
+      margin-top: 6px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .voice-card-desc {
+      margin-top: 10px;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .voice-badge {
+      display: inline-block;
+      min-width: 42px;
+      text-align: center;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(15, 118, 110, 0.2);
+      background: rgba(15, 118, 110, 0.08);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .stat {
+      background: #fbfcff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .stat .label { font-size: 12px; color: var(--muted); }
+    .stat .value { font-size: 22px; font-weight: 700; margin-top: 6px; }
+    .status {
+      min-height: 22px;
+      color: var(--accent);
+      font-size: 14px;
+      margin-bottom: 10px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 8px;
+      vertical-align: top;
+      text-align: left;
+      word-break: break-word;
+      font-size: 14px;
+    }
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    audio { width: 100%; margin-top: 12px; }
+    .pill {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      font-size: 12px;
+      color: var(--muted);
+      margin-right: 8px;
+    }
+    .error { color: #b91c1c; }
+    .ok { color: var(--accent); }
+    .warn { color: var(--accent-2); }
+    .logs {
+      background: #10151d;
+      color: #dbe6f3;
+      border-radius: 8px;
+      border: 1px solid #243041;
+      padding: 12px;
+      min-height: 220px;
+      max-height: 320px;
+      overflow: auto;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: 1fr; }
+      .row2 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>同传 Demo</h1>
+    <p>页面打开后会先后台预热。你可以上传音频，也可以直接用麦克风录中文语音和参考音频，页面会实时追加转录、翻译和每段耗时。</p>
+
+    <div class="grid">
+      <section class="panel stack">
+        <div class="field">
+          <label>预热状态</label>
+          <div class="hint" id="warmupStatus">检查中</div>
+        </div>
+        <div class="field">
+          <label>生成音色策略</label>
+          <div class="row2 mode-toggle">
+            <button id="cloneModeBtn" class="secondary active" type="button">克隆参考音色</button>
+            <button id="voiceCardModeBtn" class="secondary" type="button">参考音色抽卡</button>
+          </div>
+          <div class="hint" id="voiceModeHint">使用你自己的参考音频做音色克隆。</div>
+        </div>
+        <div class="field">
+          <label for="audioInput">中文语音</label>
+          <input id="audioInput" type="file" accept="audio/*">
+          <div class="row2">
+            <button id="recordSourceBtn" class="secondary" type="button">开始录中文</button>
+            <button id="stopSourceBtn" class="secondary" type="button" disabled>停止录中文</button>
+          </div>
+        </div>
+        <div id="cloneFields" class="stack">
+          <div class="field">
+            <label for="refInput">参考音频</label>
+            <input id="refInput" type="file" accept="audio/*">
+            <div class="row2">
+              <button id="recordRefBtn" class="secondary" type="button">开始录参考音频</button>
+              <button id="stopRefBtn" class="secondary" type="button" disabled>停止录参考音频</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="refText">参考音频文本（仅记录，不参与当前 TTS）</label>
+            <textarea id="refText" placeholder="可填参考音频真实文本；当前模式不会把它念出来"></textarea>
+          </div>
+        </div>
+        <div id="voiceCardPanel" class="stack" hidden>
+          <div class="row2">
+            <button id="drawVoiceBtn" class="secondary" type="button">抽一张音色卡</button>
+            <button id="rerollVoiceBtn" class="secondary" type="button">重新抽卡</button>
+          </div>
+          <div id="voiceCardResult" class="voice-card empty">还没抽卡。点一下上面的按钮，从你的参考音频里抽一个克隆配方。</div>
+          <div class="hint">抽卡模式仍然使用你的参考音频，只是会切换不同的克隆策略。当前参考文本不会参与 TTS 发声。</div>
+        </div>
+        <div class="stack">
+          <button id="runBtn">开始测试</button>
+          <button id="sampleBtn" class="secondary" type="button">加载仓库样例</button>
+        </div>
+        <div class="hint">建议先用 `test_zh.wav` 和 `test_ref.wav` 验证通路，再换成你自己的音色样本。</div>
+      </section>
+
+      <section class="panel">
+        <div class="status" id="status">等待开始</div>
+        <div class="stats">
+          <div class="stat">
+            <div class="label">首包音频</div>
+            <div class="value" id="firstAudio">-</div>
+          </div>
+          <div class="stat">
+            <div class="label">总耗时</div>
+            <div class="value" id="totalMs">-</div>
+          </div>
+          <div class="stat">
+            <div class="label">分段数</div>
+            <div class="value" id="segmentCount">0</div>
+          </div>
+        </div>
+
+        <div class="stack">
+          <div>
+            <span class="pill">实时转录</span>
+            <span class="pill">实时翻译</span>
+            <span class="pill">分段耗时</span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 8%">#</th>
+                <th style="width: 26%">中文</th>
+                <th style="width: 30%">英文</th>
+                <th style="width: 12%">ASR Ready</th>
+                <th style="width: 10%">MT</th>
+                <th style="width: 10%">TTS</th>
+              </tr>
+            </thead>
+            <tbody id="resultsBody"></tbody>
+          </table>
+          <div id="audioWrap" hidden>
+            <h2>克隆音色试听</h2>
+            <audio id="outputAudio" controls></audio>
+          </div>
+          <div>
+            <h2>服务端日志</h2>
+            <div id="logsBox" class="logs">等待日志...</div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const audioInput = document.getElementById("audioInput");
+    const refInput = document.getElementById("refInput");
+    const refText = document.getElementById("refText");
+    const runBtn = document.getElementById("runBtn");
+    const sampleBtn = document.getElementById("sampleBtn");
+    const recordSourceBtn = document.getElementById("recordSourceBtn");
+    const stopSourceBtn = document.getElementById("stopSourceBtn");
+    const recordRefBtn = document.getElementById("recordRefBtn");
+    const stopRefBtn = document.getElementById("stopRefBtn");
+    const cloneModeBtn = document.getElementById("cloneModeBtn");
+    const voiceCardModeBtn = document.getElementById("voiceCardModeBtn");
+    const voiceModeHint = document.getElementById("voiceModeHint");
+    const cloneFields = document.getElementById("cloneFields");
+    const voiceCardPanel = document.getElementById("voiceCardPanel");
+    const drawVoiceBtn = document.getElementById("drawVoiceBtn");
+    const rerollVoiceBtn = document.getElementById("rerollVoiceBtn");
+    const voiceCardResult = document.getElementById("voiceCardResult");
+    const statusEl = document.getElementById("status");
+    const warmupStatusEl = document.getElementById("warmupStatus");
+    const firstAudioEl = document.getElementById("firstAudio");
+    const totalMsEl = document.getElementById("totalMs");
+    const segmentCountEl = document.getElementById("segmentCount");
+    const resultsBody = document.getElementById("resultsBody");
+    const audioWrap = document.getElementById("audioWrap");
+    const outputAudio = document.getElementById("outputAudio");
+    const logsBox = document.getElementById("logsBox");
+    let warmupReady = false;
+    let sourceRecorder = null;
+    let refRecorder = null;
+    let voiceMode = "clone";
+    let voiceCards = [];
+    let selectedVoiceCard = null;
+    let latestLogSeq = 0;
+    let pendingHintTimer = null;
+    let audioContext = null;
+    let audioWorkletLoadPromise = null;
+    let audioStreamNode = null;
+    let currentTranslateController = null;
+    let activeRunToken = 0;
+    let streamStarted = false;
+    let pendingAudioChunks = [];
+    let pendingBufferedSeconds = 0;
+    let audioChunkArrivalTimes = [];
+    let requestStartedAtMs = 0;
+    let firstPlaybackMs = null;
+    let underrunNotified = false;
+    let firstChunkReceivedAtMs = null;
+    const TARGET_START_BUFFER_S = 0.28;
+    const MAX_START_BUFFER_S = 0.42;
+    const START_SAFETY_MARGIN_S = 0.05;
+    const MIN_HOLD_AFTER_FIRST_CHUNK_MS = 120;
+    const MIN_START_CHUNKS = 1;
+
+    function setStatus(text, isError = false) {
+      statusEl.textContent = text;
+      statusEl.className = isError ? "status error" : "status";
+    }
+
+    function fmtMs(value) {
+      if (value === null || value === undefined) return "-";
+      return `${Math.round(value)} ms`;
+    }
+
+    function setWarmupState(state) {
+      if (!state) return;
+      if (state.status === "ready") {
+        warmupReady = true;
+        warmupStatusEl.textContent = "已预热完成，可以直接开始";
+        warmupStatusEl.className = "hint ok";
+      } else if (state.status === "warming") {
+        warmupReady = false;
+        warmupStatusEl.textContent = `预热中: ${state.message || "处理中"}`;
+        warmupStatusEl.className = "hint warn";
+      } else if (state.status === "error") {
+        warmupReady = false;
+        warmupStatusEl.textContent = `预热失败: ${state.error || state.message}`;
+        warmupStatusEl.className = "hint error";
+      } else {
+        warmupReady = false;
+        warmupStatusEl.textContent = "等待预热";
+        warmupStatusEl.className = "hint";
+      }
+    }
+
+    function randomChoice(items) {
+      if (!items.length) return null;
+      return items[Math.floor(Math.random() * items.length)];
+    }
+
+    function renderSelectedVoiceCard() {
+      if (!selectedVoiceCard) {
+        voiceCardResult.className = "voice-card empty";
+        voiceCardResult.textContent = "还没抽卡。点一下上面的按钮，从你的参考音频里抽一个克隆配方。";
+        return;
+      }
+      voiceCardResult.className = "voice-card";
+      voiceCardResult.innerHTML = `
+        <div class="voice-card-title">
+          <span>${selectedVoiceCard.title}</span>
+          <span class="voice-badge">${selectedVoiceCard.rarity}</span>
+        </div>
+        <div class="voice-card-meta">基于当前参考音频的同源克隆配方</div>
+        <div class="voice-card-desc">${selectedVoiceCard.description}</div>
+      `;
+    }
+
+    function setVoiceMode(mode) {
+      voiceMode = mode === "voice_card" ? "voice_card" : "clone";
+      cloneModeBtn.classList.toggle("active", voiceMode === "clone");
+      voiceCardModeBtn.classList.toggle("active", voiceMode === "voice_card");
+      cloneFields.hidden = false;
+      voiceCardPanel.hidden = voiceMode !== "voice_card";
+      voiceModeHint.textContent = voiceMode === "clone"
+        ? "使用你自己的参考音频做音色克隆。"
+        : "围绕你的参考音频抽不同克隆配方，再用你选中的配方生成英文语音。";
+      if (voiceMode === "voice_card" && !selectedVoiceCard && voiceCards.length) {
+        drawRandomVoiceCard();
+      }
+    }
+
+    function drawRandomVoiceCard() {
+      selectedVoiceCard = randomChoice(voiceCards);
+      renderSelectedVoiceCard();
+      if (selectedVoiceCard) {
+        setStatus(`抽到了 ${selectedVoiceCard.title} 音色卡`);
+      }
+    }
+
+    function resetResults() {
+      resultsBody.innerHTML = "";
+      firstAudioEl.textContent = "-";
+      totalMsEl.textContent = "-";
+      segmentCountEl.textContent = "0";
+      audioWrap.hidden = true;
+      outputAudio.pause();
+      outputAudio.removeAttribute("src");
+      outputAudio.load();
+      stopStreamingPlayback();
+      if (pendingHintTimer) {
+        window.clearTimeout(pendingHintTimer);
+        pendingHintTimer = null;
+      }
+    }
+
+    function cancelActiveTranslate() {
+      if (currentTranslateController) {
+        currentTranslateController.abort();
+        currentTranslateController = null;
+      }
+    }
+
+    async function ensureAudioContext() {
+      const AudioCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtor) {
+        throw new Error("当前浏览器不支持 Web Audio");
+      }
+      if (!audioContext) {
+        audioContext = new AudioCtor();
+      }
+      if (audioContext.state === "suspended") {
+        await audioContext.resume();
+      }
+      if (!audioWorkletLoadPromise) {
+        audioWorkletLoadPromise = audioContext.audioWorklet.addModule("/static/audio-stream-worklet.js");
+      }
+      await audioWorkletLoadPromise;
+      if (!audioStreamNode) {
+        audioStreamNode = new AudioWorkletNode(audioContext, "audio-stream-player", {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+        });
+        audioStreamNode.port.onmessage = (event) => {
+          const message = event.data || {};
+          if (message.type === "started") {
+            if (!streamStarted) {
+              streamStarted = true;
+              markFirstPlayback();
+              setStatus("首包音频已开始播放");
+            }
+          } else if (message.type === "underrun") {
+            if (!underrunNotified) {
+              underrunNotified = true;
+              setStatus("播放缓存已耗尽：当前 TTS 生成速度低于实时播放速度");
+            }
+          }
+        };
+        audioStreamNode.connect(audioContext.destination);
+      }
+      return audioContext;
+    }
+
+    function stopStreamingPlayback() {
+      streamStarted = false;
+      pendingAudioChunks = [];
+      pendingBufferedSeconds = 0;
+      audioChunkArrivalTimes = [];
+      firstPlaybackMs = null;
+      underrunNotified = false;
+      firstChunkReceivedAtMs = null;
+      if (audioStreamNode) {
+        audioStreamNode.port.postMessage({ type: "reset" });
+      }
+    }
+
+    function base64ToArrayBuffer(value) {
+      const binary = window.atob(value);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return bytes.buffer;
+    }
+
+    function pcmBase64ToFloat32Array(value) {
+      const buffer = base64ToArrayBuffer(value);
+      return new Float32Array(buffer);
+    }
+
+    function markFirstPlayback() {
+      if (firstPlaybackMs !== null) return;
+      firstPlaybackMs = performance.now() - requestStartedAtMs;
+      firstAudioEl.textContent = fmtMs(firstPlaybackMs);
+    }
+
+    function averageChunkGapSeconds() {
+      if (audioChunkArrivalTimes.length < 2) return null;
+      let total = 0;
+      for (let index = 1; index < audioChunkArrivalTimes.length; index += 1) {
+        total += audioChunkArrivalTimes[index] - audioChunkArrivalTimes[index - 1];
+      }
+      return (total / (audioChunkArrivalTimes.length - 1)) / 1000;
+    }
+
+    function averageChunkDurationSeconds() {
+      if (!pendingAudioChunks.length) return null;
+      return pendingBufferedSeconds / pendingAudioChunks.length;
+    }
+
+    function concatFloat32Arrays(chunks) {
+      if (chunks.length === 1) return chunks[0];
+      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const merged = new Float32Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        merged.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return merged;
+    }
+
+    function resampleLinear(samples, inputRate, outputRate) {
+      if (inputRate === outputRate) {
+        return samples;
+      }
+      const outputLength = Math.max(1, Math.round(samples.length * outputRate / inputRate));
+      const output = new Float32Array(outputLength);
+      const ratio = inputRate / outputRate;
+      for (let index = 0; index < outputLength; index += 1) {
+        const position = index * ratio;
+        const left = Math.floor(position);
+        const right = Math.min(left + 1, samples.length - 1);
+        const fraction = position - left;
+        const leftValue = samples[Math.min(left, samples.length - 1)];
+        const rightValue = samples[right];
+        output[index] = leftValue + (rightValue - leftValue) * fraction;
+      }
+      return output;
+    }
+
+    function flushPendingAudio(ctx, mergeAll = false) {
+      if (!pendingAudioChunks.length || !audioStreamNode) return;
+      if (mergeAll && pendingAudioChunks.length > 1) {
+        const merged = concatFloat32Arrays(pendingAudioChunks);
+        pendingAudioChunks = [];
+        pendingBufferedSeconds = 0;
+        audioStreamNode.port.postMessage({ type: "append", samples: merged.buffer }, [merged.buffer]);
+        return;
+      }
+
+      while (pendingAudioChunks.length) {
+        const chunk = pendingAudioChunks.shift();
+        pendingBufferedSeconds = Math.max(0, pendingBufferedSeconds - (chunk.length / ctx.sampleRate));
+        audioStreamNode.port.postMessage({ type: "append", samples: chunk.buffer }, [chunk.buffer]);
+      }
+    }
+
+    function shouldStartPlayback(event) {
+      if (streamStarted || event.is_final_chunk) {
+        return true;
+      }
+      if (firstChunkReceivedAtMs === null) {
+        return false;
+      }
+      if ((performance.now() - firstChunkReceivedAtMs) < MIN_HOLD_AFTER_FIRST_CHUNK_MS) {
+        return false;
+      }
+      if (pendingAudioChunks.length < MIN_START_CHUNKS) {
+        return false;
+      }
+      const observedGapS = averageChunkGapSeconds();
+      const averageChunkS = averageChunkDurationSeconds();
+      if (observedGapS === null || averageChunkS === null) {
+        return pendingBufferedSeconds >= TARGET_START_BUFFER_S;
+      }
+      const requiredBufferS = Math.min(
+        MAX_START_BUFFER_S,
+        Math.max(TARGET_START_BUFFER_S, observedGapS + START_SAFETY_MARGIN_S - averageChunkS * 0.25)
+      );
+      return pendingBufferedSeconds >= requiredBufferS;
+    }
+
+    async function enqueueAudioChunk(event, runToken) {
+      if (runToken !== activeRunToken) {
+        return;
+      }
+      const ctx = await ensureAudioContext();
+      if (runToken !== activeRunToken) {
+        return;
+      }
+      audioChunkArrivalTimes.push(performance.now());
+      if (audioChunkArrivalTimes.length > 6) {
+        audioChunkArrivalTimes.shift();
+      }
+      if (firstChunkReceivedAtMs === null) {
+        firstChunkReceivedAtMs = performance.now();
+      }
+      const rawSamples = pcmBase64ToFloat32Array(event.audio_pcm_base64);
+      const samples = resampleLinear(rawSamples, event.sample_rate, ctx.sampleRate);
+      pendingAudioChunks.push(samples);
+      pendingBufferedSeconds += samples.length / ctx.sampleRate;
+
+      if (!shouldStartPlayback(event)) {
+        setStatus(
+          `正在缓冲首包音频（${pendingAudioChunks.length} 块 / ${Math.round(pendingBufferedSeconds * 1000)} ms）`
+        );
+        return;
+      }
+
+      if (!streamStarted) {
+        flushPendingAudio(ctx, true);
+        return;
+      }
+
+      flushPendingAudio(ctx, false);
+    }
+
+    function appendLogLines(logs) {
+      if (!logs || !logs.length) return;
+      const atBottom = logsBox.scrollTop + logsBox.clientHeight >= logsBox.scrollHeight - 20;
+      for (const entry of logs) {
+        logsBox.textContent = logsBox.textContent === "等待日志..."
+          ? entry.line
+          : `${logsBox.textContent}\n${entry.line}`;
+        latestLogSeq = Math.max(latestLogSeq, entry.seq || 0);
+      }
+      if (atBottom) {
+        logsBox.scrollTop = logsBox.scrollHeight;
+      }
+    }
+
+    function appendSegment(segment) {
+      const row = document.createElement("tr");
+      row.innerHTML = `
+        <td>${segment.index}</td>
+        <td>${segment.chinese}</td>
+        <td>${segment.english}</td>
+        <td>${fmtMs(segment.asr_ready_ms)}</td>
+        <td>${fmtMs(segment.mt_ms)}</td>
+        <td>${fmtMs(segment.tts_ms)}</td>
+      `;
+      resultsBody.appendChild(row);
+      segmentCountEl.textContent = String(resultsBody.children.length);
+    }
+
+    async function loadConfig() {
+      const resp = await fetch("/api/config");
+      const data = await resp.json();
+      if (data.default_ref_text) {
+        refText.value = data.default_ref_text;
+      }
+      voiceCards = data.voice_cards || [];
+      renderSelectedVoiceCard();
+      sampleBtn.dataset.sampleAudio = data.sample_audio_url || "";
+      sampleBtn.dataset.sampleRefAudio = data.sample_ref_audio_url || "";
+      setWarmupState(data.warmup);
+    }
+
+    async function pollWarmup() {
+      const resp = await fetch("/api/warmup");
+      const data = await resp.json();
+      setWarmupState(data);
+      if (!warmupReady && data.status !== "error") {
+        window.setTimeout(pollWarmup, 1200);
+      }
+    }
+
+    async function pollLogs() {
+      try {
+        const resp = await fetch(`/api/logs?since=${latestLogSeq}`);
+        const data = await resp.json();
+        appendLogLines(data.logs || []);
+        latestLogSeq = Math.max(latestLogSeq, data.latest_seq || latestLogSeq);
+      } catch (err) {
+        appendLogLines([{ seq: latestLogSeq + 1, line: `[log poll error] ${err.message}` }]);
+      } finally {
+        window.setTimeout(pollLogs, 1000);
+      }
+    }
+
+    async function loadSampleFile(pathValue, inputEl) {
+      if (!pathValue) return;
+      const response = await fetch(pathValue);
+      if (!response.ok) return;
+      const blob = await response.blob();
+      const name = pathValue.split("/").pop();
+      const file = new File([blob], name, { type: blob.type || "audio/wav" });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      inputEl.files = dt.files;
+    }
+
+    sampleBtn.addEventListener("click", async () => {
+      setStatus("加载样例中");
+      try {
+        await loadSampleFile(sampleBtn.dataset.sampleAudio, audioInput);
+        await loadSampleFile(sampleBtn.dataset.sampleRefAudio, refInput);
+        setStatus("样例已加载");
+      } catch (err) {
+        setStatus(`加载样例失败: ${err.message}`, true);
+      }
+    });
+
+    cloneModeBtn.addEventListener("click", () => setVoiceMode("clone"));
+    voiceCardModeBtn.addEventListener("click", () => setVoiceMode("voice_card"));
+    drawVoiceBtn.addEventListener("click", () => drawRandomVoiceCard());
+    rerollVoiceBtn.addEventListener("click", () => drawRandomVoiceCard());
+
+    function assignBlobToInput(blob, inputEl, fileName) {
+      const file = new File([blob], fileName, { type: blob.type || "audio/webm" });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      inputEl.files = dt.files;
+    }
+
+    async function startRecorder(kind) {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const chunks = [];
+      const recorder = new MediaRecorder(stream);
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size) chunks.push(event.data);
+      };
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+        if (kind === "source") {
+          assignBlobToInput(blob, audioInput, "source-recording.webm");
+          setStatus("中文语音已录制");
+          recordSourceBtn.disabled = false;
+          stopSourceBtn.disabled = true;
+          sourceRecorder = null;
+        } else {
+          assignBlobToInput(blob, refInput, "reference-recording.webm");
+          setStatus("参考音频已录制");
+          recordRefBtn.disabled = false;
+          stopRefBtn.disabled = true;
+          refRecorder = null;
+        }
+        stream.getTracks().forEach((track) => track.stop());
+      };
+      recorder.start();
+      return recorder;
+    }
+
+    recordSourceBtn.addEventListener("click", async () => {
+      try {
+        sourceRecorder = await startRecorder("source");
+        recordSourceBtn.disabled = true;
+        stopSourceBtn.disabled = false;
+        setStatus("正在录制中文语音");
+      } catch (err) {
+        setStatus(`无法打开麦克风: ${err.message}`, true);
+      }
+    });
+
+    stopSourceBtn.addEventListener("click", () => {
+      if (sourceRecorder && sourceRecorder.state !== "inactive") sourceRecorder.stop();
+    });
+
+    recordRefBtn.addEventListener("click", async () => {
+      try {
+        refRecorder = await startRecorder("ref");
+        recordRefBtn.disabled = true;
+        stopRefBtn.disabled = false;
+        setStatus("正在录制参考音频");
+      } catch (err) {
+        setStatus(`无法打开麦克风: ${err.message}`, true);
+      }
+    });
+
+    stopRefBtn.addEventListener("click", () => {
+      if (refRecorder && refRecorder.state !== "inactive") refRecorder.stop();
+    });
+
+    runBtn.addEventListener("click", async () => {
+      cancelActiveTranslate();
+      resetResults();
+      const audioFile = audioInput.files[0];
+      const refFile = refInput.files[0];
+
+      if (!audioFile) {
+        setStatus("请先选择中文语音", true);
+        return;
+      }
+      if (voiceMode === "voice_card" && !selectedVoiceCard) {
+        drawRandomVoiceCard();
+        if (!selectedVoiceCard) {
+          setStatus("当前没有可用的音色卡", true);
+          return;
+        }
+      }
+
+      runBtn.disabled = true;
+      requestStartedAtMs = performance.now();
+      try {
+        await ensureAudioContext();
+      } catch (err) {
+        setStatus(`无法初始化音频播放: ${err.message}`, true);
+        runBtn.disabled = false;
+        return;
+      }
+      setStatus(warmupReady ? "开始转写和翻译" : "模型尚在预热，先继续排队处理");
+      pendingHintTimer = window.setTimeout(() => {
+        setStatus("仍在处理中：首段 ASR / MT / TTS 可能需要几秒到十几秒，请先看下方服务端日志");
+      }, 3000);
+      const runToken = activeRunToken + 1;
+      activeRunToken = runToken;
+      currentTranslateController = new AbortController();
+
+      const form = new FormData();
+      form.append("audio", audioFile);
+      form.append("voice_mode", voiceMode);
+      if (refFile) form.append("ref_audio", refFile);
+      if (voiceMode === "voice_card" && selectedVoiceCard) {
+        form.append("voice_card", selectedVoiceCard.key);
+      }
+      form.append("ref_text", refText.value || "");
+
+      try {
+        const resp = await fetch("/api/translate", {
+          method: "POST",
+          body: form,
+          signal: currentTranslateController.signal,
+        });
+        if (!resp.ok || !resp.body) {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop();
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            if (runToken !== activeRunToken) {
+              continue;
+            }
+            const event = JSON.parse(line);
+            if (event.type === "status") {
+              if (event.message === "normalizing_audio") {
+                setStatus("服务端正在标准化音频格式");
+              } else if (event.message.startsWith("selected_voice_card:")) {
+                const selectedKey = event.message.split(":")[1];
+                const matched = voiceCards.find((item) => item.key === selectedKey);
+                setStatus(matched ? `已锁定音色卡: ${matched.title}` : `已锁定音色卡: ${selectedKey}`);
+              } else {
+                setStatus("模型已就绪，开始处理");
+              }
+            } else if (event.type === "segment") {
+              if (pendingHintTimer) {
+                window.clearTimeout(pendingHintTimer);
+                pendingHintTimer = null;
+              }
+              appendSegment(event.segment);
+              setStatus(`已生成第 ${event.segment.index} 段`);
+            } else if (event.type === "audio_chunk") {
+              if (pendingHintTimer) {
+                window.clearTimeout(pendingHintTimer);
+                pendingHintTimer = null;
+              }
+              try {
+                await enqueueAudioChunk(event, runToken);
+              } catch (audioErr) {
+                setStatus(`流式播放失败: ${audioErr.message}`, true);
+              }
+            } else if (event.type === "done") {
+              if (pendingHintTimer) {
+                window.clearTimeout(pendingHintTimer);
+                pendingHintTimer = null;
+              }
+              if (firstPlaybackMs === null) {
+                firstAudioEl.textContent = fmtMs(event.timings.first_audio_ms);
+              }
+              totalMsEl.textContent = fmtMs(event.timings.total_ms);
+              segmentCountEl.textContent = String(event.timings.segment_count);
+              outputAudio.src = event.audio_url;
+              audioWrap.hidden = false;
+              setStatus("完成");
+            } else if (event.type === "error") {
+              if (pendingHintTimer) {
+                window.clearTimeout(pendingHintTimer);
+                pendingHintTimer = null;
+              }
+              throw new Error(event.message);
+            }
+          }
+        }
+      } catch (err) {
+        if (err.name === "AbortError") {
+          setStatus("已取消当前流式请求");
+          return;
+        }
+        if (pendingHintTimer) {
+          window.clearTimeout(pendingHintTimer);
+          pendingHintTimer = null;
+        }
+        setStatus(`运行失败: ${err.message}`, true);
+      } finally {
+        if (currentTranslateController && currentTranslateController.signal.aborted) {
+          currentTranslateController = null;
+        } else if (runToken === activeRunToken) {
+          currentTranslateController = null;
+        }
+        if (pendingHintTimer) {
+          window.clearTimeout(pendingHintTimer);
+          pendingHintTimer = null;
+        }
+        runBtn.disabled = false;
+      }
+    });
+
+    window.addEventListener("pagehide", () => {
+      cancelActiveTranslate();
+      stopStreamingPlayback();
+    });
+
+    window.addEventListener("beforeunload", () => {
+      cancelActiveTranslate();
+      stopStreamingPlayback();
+    });
+
+    loadConfig()
+      .then(() => pollWarmup())
+      .catch((err) => setStatus(`初始化失败: ${err.message}`, true));
+    setVoiceMode("clone");
+    pollLogs();
+  </script>
+</body>
+</html>

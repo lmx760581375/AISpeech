@@ -1,0 +1,674 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Realtime Simul Demo</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --line: #d8dee9;
+      --ink: #18212f;
+      --muted: #5f6b7a;
+      --accent: #0f766e;
+      --danger: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+    main { max-width: 1160px; margin: 0 auto; padding: 24px 16px 40px; }
+    h1, h2 { margin: 0 0 12px; }
+    p { margin: 0; color: var(--muted); }
+    .grid { display: grid; grid-template-columns: 360px 1fr; gap: 16px; align-items: start; margin-top: 18px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+    .stack { display: grid; gap: 12px; }
+    .field { display: grid; gap: 6px; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    label { font-size: 14px; font-weight: 600; }
+    input[type="file"], input[type="number"], textarea, button { width: 100%; font: inherit; }
+    input[type="number"] { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+    textarea { min-height: 96px; resize: vertical; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+    button { border: 1px solid var(--ink); background: var(--ink); color: #fff; border-radius: 8px; padding: 12px 14px; cursor: pointer; }
+    button.secondary { background: #fff; color: var(--ink); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .hint { font-size: 13px; color: var(--muted); }
+    .status { min-height: 22px; color: var(--accent); font-size: 14px; margin-bottom: 10px; }
+    .error { color: var(--danger); }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .stat { background: #fbfcff; border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+    .stat .label { font-size: 12px; color: var(--muted); }
+    .stat .value { font-size: 22px; font-weight: 700; margin-top: 6px; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th, td { border-bottom: 1px solid var(--line); padding: 10px 8px; vertical-align: top; text-align: left; word-break: break-word; font-size: 14px; }
+    th { color: var(--muted); font-size: 12px; font-weight: 700; }
+    audio { width: 100%; margin-top: 12px; }
+    .logs { background: #10151d; color: #dbe6f3; border-radius: 8px; border: 1px solid #243041; padding: 12px; min-height: 220px; max-height: 320px; overflow: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: 1fr 1fr; }
+      .row2 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>实时同传 Demo</h1>
+    <p>这个页面会持续采集麦克风音频，按固定窗口推到服务端，目标是把输入和输出之间的延迟控制在一个稳定区间，而不是越说越晚。</p>
+
+    <div class="grid">
+      <section class="panel stack">
+        <div class="field">
+          <label for="refInput">参考音频</label>
+          <input id="refInput" type="file" accept="audio/*">
+          <div class="row2">
+            <button id="recordRefBtn" class="secondary" type="button">开始录参考音频</button>
+            <button id="stopRefBtn" class="secondary" type="button" disabled>停止录参考音频</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="refText">参考音频文本（当前不参与合成）</label>
+          <textarea id="refText" placeholder="可填参考音频真实文本；当前 realtime demo 走 audio-only 克隆，不会把它喂回 TTS"></textarea>
+        </div>
+        <div class="row2">
+          <div class="field">
+            <label for="windowMs">窗口 ms</label>
+            <input id="windowMs" type="number" min="600" step="100" value="1400">
+          </div>
+          <div class="field">
+            <label for="hopMs">Hop ms</label>
+            <input id="hopMs" type="number" min="300" step="100" value="1000">
+          </div>
+        </div>
+        <div class="stack">
+          <button id="startBtn">开始实时同传</button>
+          <button id="stopBtn" class="secondary" type="button" disabled>停止</button>
+        </div>
+        <div class="hint" id="configHint">初始化中</div>
+      </section>
+
+      <section class="panel">
+        <div class="status" id="status">等待开始</div>
+        <div class="stats">
+          <div class="stat">
+            <div class="label">首包音频</div>
+            <div class="value" id="firstAudio">-</div>
+          </div>
+          <div class="stat">
+            <div class="label">当前延迟</div>
+            <div class="value" id="lagMs">-</div>
+          </div>
+          <div class="stat">
+            <div class="label">输入时间轴</div>
+            <div class="value" id="sourceCursor">-</div>
+          </div>
+          <div class="stat">
+            <div class="label">输出时间轴</div>
+            <div class="value" id="playoutCursor">-</div>
+          </div>
+        </div>
+
+        <div class="stack">
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 8%">#</th>
+                <th style="width: 24%">中文</th>
+                <th style="width: 26%">英文</th>
+                <th style="width: 10%">ASR</th>
+                <th style="width: 10%">MT</th>
+                <th style="width: 10%">TTS</th>
+                <th style="width: 12%">Lag</th>
+              </tr>
+            </thead>
+            <tbody id="resultsBody"></tbody>
+          </table>
+          <div id="audioWrap" hidden>
+            <h2>整段输出回放</h2>
+            <audio id="outputAudio" controls></audio>
+          </div>
+          <div>
+            <h2>服务端日志</h2>
+            <div id="logsBox" class="logs">等待日志...</div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const refInput = document.getElementById("refInput");
+    const refText = document.getElementById("refText");
+    const recordRefBtn = document.getElementById("recordRefBtn");
+    const stopRefBtn = document.getElementById("stopRefBtn");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const windowMsInput = document.getElementById("windowMs");
+    const hopMsInput = document.getElementById("hopMs");
+    const statusEl = document.getElementById("status");
+    const configHint = document.getElementById("configHint");
+    const firstAudioEl = document.getElementById("firstAudio");
+    const lagMsEl = document.getElementById("lagMs");
+    const sourceCursorEl = document.getElementById("sourceCursor");
+    const playoutCursorEl = document.getElementById("playoutCursor");
+    const resultsBody = document.getElementById("resultsBody");
+    const audioWrap = document.getElementById("audioWrap");
+    const outputAudio = document.getElementById("outputAudio");
+    const logsBox = document.getElementById("logsBox");
+
+    let latestLogSeq = 0;
+    let latestEventSeq = 0;
+    let sessionId = null;
+    let sessionPollTimer = null;
+    let sourceRecorder = null;
+    let audioContext = null;
+    let playbackWorkletPromise = null;
+    let captureWorkletPromise = null;
+    let audioStreamNode = null;
+    let micStream = null;
+    let micSourceNode = null;
+    let micCaptureNode = null;
+    let sendChain = Promise.resolve();
+    let running = false;
+    let requestStartedAtMs = 0;
+    let firstPlaybackMs = null;
+    let pendingAudioChunks = [];
+    let pendingBufferedSeconds = 0;
+    let streamStarted = false;
+    let underrunNotified = false;
+    let latestConfig = { window_ms: 1400, hop_ms: 1000, sample_rate: 16000 };
+    let capturedSamples = new Float32Array(0);
+    let nextChunkEndSamples = null;
+    let captureSequence = 0;
+
+    const TARGET_START_BUFFER_S = 0.18;
+    const MAX_START_BUFFER_S = 0.26;
+    const START_SAFETY_MARGIN_S = 0.04;
+
+    function setStatus(text, isError = false) {
+      statusEl.textContent = text;
+      statusEl.className = isError ? "status error" : "status";
+    }
+
+    function fmtMs(value) {
+      if (value === null || value === undefined) return "-";
+      return `${Math.round(value)} ms`;
+    }
+
+    function fmtSecFromMs(value) {
+      if (value === null || value === undefined) return "-";
+      return `${(value / 1000).toFixed(1)} s`;
+    }
+
+    function appendLogLines(logs) {
+      if (!logs || !logs.length) return;
+      const atBottom = logsBox.scrollTop + logsBox.clientHeight >= logsBox.scrollHeight - 20;
+      for (const entry of logs) {
+        logsBox.textContent = logsBox.textContent === "等待日志..."
+          ? entry.line
+          : `${logsBox.textContent}\n${entry.line}`;
+        latestLogSeq = Math.max(latestLogSeq, entry.seq || 0);
+      }
+      if (atBottom) {
+        logsBox.scrollTop = logsBox.scrollHeight;
+      }
+    }
+
+    async function pollLogs() {
+      try {
+        const resp = await fetch(`/api/logs?since=${latestLogSeq}`);
+        const data = await resp.json();
+        appendLogLines(data.logs || []);
+        latestLogSeq = Math.max(latestLogSeq, data.latest_seq || latestLogSeq);
+      } catch (err) {
+        appendLogLines([{ seq: latestLogSeq + 1, line: `[log poll error] ${err.message}` }]);
+      } finally {
+        window.setTimeout(pollLogs, 1000);
+      }
+    }
+
+    async function loadConfig() {
+      const resp = await fetch("/api/realtime/config");
+      const data = await resp.json();
+      latestConfig = data;
+      if (data.default_ref_text) {
+        refText.value = data.default_ref_text;
+      }
+      windowMsInput.value = data.window_ms;
+      hopMsInput.value = data.hop_ms;
+      configHint.textContent = `窗口 ${data.window_ms} ms / hop ${data.hop_ms} ms / 采样率 ${data.sample_rate} Hz`;
+    }
+
+    async function ensureAudioContext() {
+      const AudioCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtor) {
+        throw new Error("当前浏览器不支持 Web Audio");
+      }
+      if (!audioContext) {
+        audioContext = new AudioCtor();
+      }
+      if (audioContext.state === "suspended") {
+        await audioContext.resume();
+      }
+      if (!playbackWorkletPromise) {
+        playbackWorkletPromise = audioContext.audioWorklet.addModule("/static/audio-stream-worklet.js");
+      }
+      if (!captureWorkletPromise) {
+        captureWorkletPromise = audioContext.audioWorklet.addModule("/static/mic-capture-worklet.js");
+      }
+      await playbackWorkletPromise;
+      await captureWorkletPromise;
+
+      if (!audioStreamNode) {
+        audioStreamNode = new AudioWorkletNode(audioContext, "audio-stream-player", {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+        });
+        audioStreamNode.port.onmessage = (event) => {
+          const message = event.data || {};
+          if (message.type === "started") {
+            if (!streamStarted) {
+              streamStarted = true;
+              if (firstPlaybackMs === null) {
+                firstPlaybackMs = performance.now() - requestStartedAtMs;
+                firstAudioEl.textContent = fmtMs(firstPlaybackMs);
+              }
+              setStatus("首包音频已开始播放");
+            }
+          } else if (message.type === "underrun") {
+            if (!underrunNotified) {
+              underrunNotified = true;
+              setStatus("播放缓存已耗尽：当前生成速度低于实时播放速度");
+            }
+          }
+        };
+        audioStreamNode.connect(audioContext.destination);
+      }
+      return audioContext;
+    }
+
+    function stopStreamingPlayback() {
+      pendingAudioChunks = [];
+      pendingBufferedSeconds = 0;
+      streamStarted = false;
+      underrunNotified = false;
+      if (audioStreamNode) {
+        audioStreamNode.port.postMessage({ type: "reset" });
+      }
+    }
+
+    function base64ToArrayBuffer(value) {
+      const binary = window.atob(value);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return bytes.buffer;
+    }
+
+    function pcmBase64ToFloat32Array(value) {
+      return new Float32Array(base64ToArrayBuffer(value));
+    }
+
+    function resampleLinear(samples, inputRate, outputRate) {
+      if (inputRate === outputRate) return samples;
+      const outputLength = Math.max(1, Math.round(samples.length * outputRate / inputRate));
+      const output = new Float32Array(outputLength);
+      const ratio = inputRate / outputRate;
+      for (let i = 0; i < outputLength; i += 1) {
+        const position = i * ratio;
+        const left = Math.floor(position);
+        const right = Math.min(left + 1, samples.length - 1);
+        const frac = position - left;
+        output[i] = samples[left] + (samples[right] - samples[left]) * frac;
+      }
+      return output;
+    }
+
+    function concatFloat32Arrays(chunks) {
+      if (chunks.length === 1) return chunks[0];
+      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const merged = new Float32Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        merged.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return merged;
+    }
+
+    function flushPendingAudio(ctx) {
+      if (!pendingAudioChunks.length || !audioStreamNode) return;
+      const merged = concatFloat32Arrays(pendingAudioChunks);
+      pendingAudioChunks = [];
+      pendingBufferedSeconds = 0;
+      audioStreamNode.port.postMessage({ type: "append", samples: merged.buffer }, [merged.buffer]);
+    }
+
+    function shouldStartPlayback() {
+      if (streamStarted) return true;
+      const required = Math.min(MAX_START_BUFFER_S, TARGET_START_BUFFER_S + START_SAFETY_MARGIN_S);
+      return pendingBufferedSeconds >= required;
+    }
+
+    async function enqueueAudioChunk(event) {
+      const ctx = await ensureAudioContext();
+      const raw = pcmBase64ToFloat32Array(event.audio_pcm_base64);
+      const samples = resampleLinear(raw, event.sample_rate, ctx.sampleRate);
+      pendingAudioChunks.push(samples);
+      pendingBufferedSeconds += samples.length / ctx.sampleRate;
+      if (!shouldStartPlayback()) {
+        setStatus(`正在缓冲首包音频（${Math.round(pendingBufferedSeconds * 1000)} ms）`);
+        return;
+      }
+      flushPendingAudio(ctx);
+    }
+
+    function appendSegment(segment) {
+      const row = document.createElement("tr");
+      row.innerHTML = `
+        <td>${segment.index}</td>
+        <td>${segment.chinese}</td>
+        <td>${segment.english}</td>
+        <td>${fmtMs(segment.asr_ms)}</td>
+        <td>${fmtMs(segment.mt_ms)}</td>
+        <td>${fmtMs(segment.tts_ms)}</td>
+        <td>${fmtMs(segment.lag_ms)}</td>
+      `;
+      resultsBody.appendChild(row);
+    }
+
+    function floatTo16BitPCM(view, offset, samples) {
+      for (let i = 0; i < samples.length; i += 1, offset += 2) {
+        const value = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(offset, value < 0 ? value * 0x8000 : value * 0x7fff, true);
+      }
+    }
+
+    function encodeWav(samples, sampleRate) {
+      const buffer = new ArrayBuffer(44 + samples.length * 2);
+      const view = new DataView(buffer);
+      const writeString = (offset, text) => {
+        for (let i = 0; i < text.length; i += 1) {
+          view.setUint8(offset + i, text.charCodeAt(i));
+        }
+      };
+      writeString(0, "RIFF");
+      view.setUint32(4, 36 + samples.length * 2, true);
+      writeString(8, "WAVE");
+      writeString(12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeString(36, "data");
+      view.setUint32(40, samples.length * 2, true);
+      floatTo16BitPCM(view, 44, samples);
+      return new Blob([buffer], { type: "audio/wav" });
+    }
+
+    function appendCapturedSamples(samples) {
+      const merged = new Float32Array(capturedSamples.length + samples.length);
+      merged.set(capturedSamples, 0);
+      merged.set(samples, capturedSamples.length);
+      capturedSamples = merged;
+    }
+
+    function maybeQueueRealtimeChunks() {
+      const sampleRate = latestConfig.sample_rate;
+      const windowSamples = Math.round(sampleRate * latestConfig.window_ms / 1000);
+      const hopSamples = Math.round(sampleRate * latestConfig.hop_ms / 1000);
+
+      if (nextChunkEndSamples === null && capturedSamples.length >= windowSamples) {
+        nextChunkEndSamples = windowSamples;
+      }
+      while (nextChunkEndSamples !== null && capturedSamples.length >= nextChunkEndSamples) {
+        const start = nextChunkEndSamples - windowSamples;
+        const end = nextChunkEndSamples;
+        const chunk = capturedSamples.slice(start, end);
+        const blob = encodeWav(chunk, sampleRate);
+        const seq = captureSequence++;
+        const startMs = Math.round(start * 1000 / sampleRate);
+        const endMs = Math.round(end * 1000 / sampleRate);
+        sendChain = sendChain.then(() => sendRealtimeChunk(seq, startMs, endMs, blob));
+        nextChunkEndSamples += hopSamples;
+      }
+    }
+
+    async function sendRealtimeChunk(seq, startMs, endMs, blob) {
+      if (!sessionId) return;
+      const resp = await fetch(`/api/realtime/chunk?session_id=${encodeURIComponent(sessionId)}&seq=${seq}&start_ms=${startMs}&end_ms=${endMs}`, {
+        method: "POST",
+        headers: { "Content-Type": "audio/wav" },
+        body: blob,
+      });
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`chunk upload failed: HTTP ${resp.status} ${text}`);
+      }
+    }
+
+    async function startCapture() {
+      const ctx = await ensureAudioContext();
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micSourceNode = ctx.createMediaStreamSource(micStream);
+      micCaptureNode = new AudioWorkletNode(ctx, "mic-capture-processor", {
+        numberOfInputs: 1,
+        numberOfOutputs: 0,
+        channelCount: 1,
+      });
+      micCaptureNode.port.onmessage = (event) => {
+        const payload = event.data || {};
+        if (!payload.samples) return;
+        const input = new Float32Array(payload.samples);
+        const downsampled = resampleLinear(input, ctx.sampleRate, latestConfig.sample_rate);
+        appendCapturedSamples(downsampled);
+        maybeQueueRealtimeChunks();
+      };
+      micSourceNode.connect(micCaptureNode);
+    }
+
+    async function stopCapture() {
+      if (micCaptureNode) {
+        micCaptureNode.port.onmessage = null;
+        micCaptureNode.disconnect();
+        micCaptureNode = null;
+      }
+      if (micSourceNode) {
+        micSourceNode.disconnect();
+        micSourceNode = null;
+      }
+      if (micStream) {
+        micStream.getTracks().forEach((track) => track.stop());
+        micStream = null;
+      }
+    }
+
+    async function createSession() {
+      const form = new FormData();
+      const refFile = refInput.files[0];
+      const windowMs = Math.max(600, Number(windowMsInput.value || latestConfig.window_ms || 1400));
+      const hopMs = Math.max(300, Number(hopMsInput.value || latestConfig.hop_ms || 1000));
+      if (hopMs >= windowMs) {
+        throw new Error("hop 必须小于窗口长度");
+      }
+      if (refFile) form.append("ref_audio", refFile);
+      form.append("ref_text", refText.value || "");
+      form.append("window_ms", String(windowMs));
+      form.append("hop_ms", String(hopMs));
+      const resp = await fetch("/api/realtime/session", { method: "POST", body: form });
+      const data = await resp.json();
+      if (!resp.ok) {
+        throw new Error(data.error || `HTTP ${resp.status}`);
+      }
+      sessionId = data.session_id;
+      latestConfig = data;
+      windowMsInput.value = data.window_ms;
+      hopMsInput.value = data.hop_ms;
+      configHint.textContent = `窗口 ${data.window_ms} ms / hop ${data.hop_ms} ms / 采样率 ${data.sample_rate} Hz`;
+      latestEventSeq = 0;
+      return data;
+    }
+
+    async function pollSessionEvents() {
+      if (!sessionId || !running) return;
+      try {
+        const resp = await fetch(`/api/realtime/events?session_id=${encodeURIComponent(sessionId)}&since=${latestEventSeq}`);
+        const data = await resp.json();
+        for (const event of data.events || []) {
+          latestEventSeq = Math.max(latestEventSeq, event.seq || 0);
+          if (event.type === "partial") {
+            sourceCursorEl.textContent = fmtSecFromMs(event.source_cursor_ms);
+          } else if (event.type === "audio_chunk") {
+            await enqueueAudioChunk(event);
+          } else if (event.type === "segment") {
+            appendSegment(event.segment);
+            lagMsEl.textContent = fmtMs(event.segment.lag_ms);
+            sourceCursorEl.textContent = fmtSecFromMs(event.segment.source_cursor_ms);
+            playoutCursorEl.textContent = fmtSecFromMs(event.segment.playout_cursor_ms);
+            setStatus(`已输出第 ${event.segment.index} 段`);
+          } else if (event.type === "done") {
+            if (firstPlaybackMs === null) {
+              firstAudioEl.textContent = fmtMs(event.timings.first_audio_ms);
+            }
+            lagMsEl.textContent = fmtMs(event.timings.lag_ms);
+            sourceCursorEl.textContent = fmtSecFromMs(event.timings.source_cursor_ms);
+            playoutCursorEl.textContent = fmtSecFromMs(event.timings.playout_cursor_ms);
+            if (event.audio_url) {
+              outputAudio.src = event.audio_url;
+              audioWrap.hidden = false;
+            }
+            setStatus("会话结束");
+            running = false;
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+          } else if (event.type === "error") {
+            throw new Error(event.message);
+          }
+        }
+      } catch (err) {
+        setStatus(`实时会话失败: ${err.message}`, true);
+        running = false;
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      } finally {
+        if (running) {
+          sessionPollTimer = window.setTimeout(pollSessionEvents, 250);
+        }
+      }
+    }
+
+    function resetUI() {
+      resultsBody.innerHTML = "";
+      audioWrap.hidden = true;
+      outputAudio.removeAttribute("src");
+      firstAudioEl.textContent = "-";
+      lagMsEl.textContent = "-";
+      sourceCursorEl.textContent = "-";
+      playoutCursorEl.textContent = "-";
+      firstPlaybackMs = null;
+      capturedSamples = new Float32Array(0);
+      nextChunkEndSamples = null;
+      captureSequence = 0;
+      stopStreamingPlayback();
+      sendChain = Promise.resolve();
+    }
+
+    async function finalizeSession() {
+      await sendChain.catch(() => {});
+      if (!sessionId) return;
+      await fetch("/api/realtime/finalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+    }
+
+    async function startRefRecorder() {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const chunks = [];
+      const recorder = new MediaRecorder(stream);
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size) chunks.push(event.data);
+      };
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+        const file = new File([blob], "reference-recording.webm", { type: blob.type || "audio/webm" });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        refInput.files = dt.files;
+        recordRefBtn.disabled = false;
+        stopRefBtn.disabled = true;
+        stream.getTracks().forEach((track) => track.stop());
+        sourceRecorder = null;
+      };
+      recorder.start();
+      return recorder;
+    }
+
+    recordRefBtn.addEventListener("click", async () => {
+      try {
+        sourceRecorder = await startRefRecorder();
+        recordRefBtn.disabled = true;
+        stopRefBtn.disabled = false;
+        setStatus("正在录参考音频");
+      } catch (err) {
+        setStatus(`无法打开麦克风: ${err.message}`, true);
+      }
+    });
+
+    stopRefBtn.addEventListener("click", () => {
+      if (sourceRecorder && sourceRecorder.state !== "inactive") {
+        sourceRecorder.stop();
+      }
+    });
+
+    startBtn.addEventListener("click", async () => {
+      resetUI();
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      requestStartedAtMs = performance.now();
+      try {
+        await ensureAudioContext();
+        await createSession();
+        running = true;
+        setStatus("正在启动实时同传");
+        pollSessionEvents();
+        await startCapture();
+      } catch (err) {
+        running = false;
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        setStatus(`启动失败: ${err.message}`, true);
+      }
+    });
+
+    stopBtn.addEventListener("click", async () => {
+      stopBtn.disabled = true;
+      setStatus("正在停止");
+      running = false;
+      if (sessionPollTimer) {
+        window.clearTimeout(sessionPollTimer);
+        sessionPollTimer = null;
+      }
+      try {
+        await stopCapture();
+        await finalizeSession();
+      } catch (err) {
+        setStatus(`停止失败: ${err.message}`, true);
+      } finally {
+        startBtn.disabled = false;
+      }
+    });
+
+    loadConfig()
+      .catch((err) => setStatus(`初始化失败: ${err.message}`, true));
+    pollLogs();
+  </script>
+</body>
+</html>
