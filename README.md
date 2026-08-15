@@ -39,10 +39,13 @@ conda activate speech-trans
 pip install -r requirements.txt
 python download_models.py
 ollama pull qwen3:1.7b
-python web_demo.py --ref-audio test_ref.wav --ref-text "参考音频文本" --eager-warmup
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python web_demo.py \
+  --ref-audio test_ref.wav --ref-text "参考音频文本" --eager-warmup
 ```
 
 Then open the local page shown in the terminal.
+
+`download_models.py` is the only step that downloads Hugging Face weights. The web and CLI demos resolve ASR/TTS weights from the local cache and fail fast with a setup message if a model is missing, instead of blocking on a network request. The Ollama Qwen3 integration explicitly disables thinking so its token budget is reserved for the translation.
 
 ## Default Models
 

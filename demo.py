@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 import queue
 import re
 import shutil
@@ -41,6 +42,25 @@ import numpy as np
 PUNCTUATION_RE = re.compile(r"(?<=[,，.。!！?？;；:：])")
 ENGLISH_PUNCTUATION_RE = re.compile(r"(?<=[,.!?;:])\s+")
 ENGLISH_CLAUSE_RE = re.compile(r"\s+(?=(?:and|but|so|then|because|which|that|while|if|when|after|before)\b)", re.IGNORECASE)
+
+
+def resolve_local_model(model_id: str) -> str:
+    """Resolve a model from the local Hugging Face cache without network access."""
+    model_path = Path(model_id).expanduser()
+    if model_path.exists():
+        return str(model_path)
+
+    cache_root = Path(os.environ.get("HF_HUB_CACHE", Path.home() / ".cache" / "huggingface" / "hub"))
+    repo_cache = cache_root / f"models--{model_id.replace('/', '--')}" / "snapshots"
+    candidates = sorted(repo_cache.glob("*"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for candidate in candidates:
+        if (candidate / "config.json").is_file():
+            return str(candidate)
+
+    raise RuntimeError(
+        f"Model {model_id!r} is not available in the local Hugging Face cache. "
+        "Run `python download_models.py` before starting the service."
+    )
 
 
 def split_for_simul(text: str, max_chars: int = 18) -> List[str]:
@@ -391,7 +411,7 @@ class ASRModule:
         self.sample_rate = 16000
         self.batch_size = batch_size
         print(f"[ASR] Loading mlx-audio ASR ({resolved_model})...")
-        self.model = load_model(resolved_model, lazy=False)
+        self.model = load_model(resolve_local_model(resolved_model), lazy=False)
         print("[ASR] Ready on Apple MLX.")
 
     def _normalize_audio(self, filepath: str) -> Tuple[str, bool]:
@@ -527,7 +547,7 @@ class MTModule:
         if backend == "mlx":
             from mlx_lm import load
 
-            self._mlx_model, self._mlx_tokenizer = load(self.model, lazy=False)
+            self._mlx_model, self._mlx_tokenizer = load(resolve_local_model(self.model), lazy=False)
             print(f"[MT] Using mlx-lm model: {self.model}")
         elif backend == "ollama":
             import ollama
@@ -605,6 +625,7 @@ class MTModule:
                 "num_predict": 48,
                 "num_ctx": 512,
             },
+            think=False,
         )
         return self._cleanup_translation_text(response["message"]["content"])
 
@@ -782,7 +803,7 @@ class TTSModule:
         self._custom_voice_lock = threading.Lock()
 
         print(f"[TTS] Loading mlx-audio model: {resolved_model}")
-        self.model = load(resolved_model, lazy=False)
+        self.model = load(resolve_local_model(resolved_model), lazy=False)
         self.sample_rate = getattr(self.model, "sample_rate", 24000)
         print(f"[TTS] Ready on {self.device} at {self.sample_rate}Hz.")
 
@@ -795,7 +816,7 @@ class TTSModule:
             from mlx_audio.tts.utils import load
 
             print(f"[TTS] Loading custom voice model: {self.CUSTOM_VOICE_MODEL_ID}")
-            self._custom_voice_model = load(self.CUSTOM_VOICE_MODEL_ID, lazy=False)
+            self._custom_voice_model = load(resolve_local_model(self.CUSTOM_VOICE_MODEL_ID), lazy=False)
             print("[TTS] Custom voice model ready.")
         return self._custom_voice_model
 
