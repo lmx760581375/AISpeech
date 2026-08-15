@@ -42,6 +42,8 @@ import numpy as np
 PUNCTUATION_RE = re.compile(r"(?<=[,，.。!！?？;；:：])")
 ENGLISH_PUNCTUATION_RE = re.compile(r"(?<=[,.!?;:])\s+")
 ENGLISH_CLAUSE_RE = re.compile(r"\s+(?=(?:and|but|so|then|because|which|that|while|if|when|after|before)\b)", re.IGNORECASE)
+TTS_DEFAULT_MAX_TOKENS = 512
+TTS_MAX_STREAM_SECONDS = 20.0
 
 
 def resolve_local_model(model_id: str) -> str:
@@ -894,10 +896,12 @@ class TTSModule:
             "text": english_text,
             "lang_code": "english",
             "stream": False,
+            "max_tokens": TTS_DEFAULT_MAX_TOKENS,
         }
         generation_options = generation_options or {}
         with self._generation_session(ref_audio_path, ref_text) as (ref_audio_input, active_ref_text):
             generate_kwargs["ref_audio"] = ref_audio_input
+            generate_kwargs["ref_text"] = active_ref_text
             for option_key in ("temperature", "top_p", "repetition_penalty", "top_k", "max_tokens"):
                 if option_key in generation_options and generation_options[option_key] is not None:
                     generate_kwargs[option_key] = generation_options[option_key]
@@ -929,14 +933,23 @@ class TTSModule:
             "lang_code": "english",
             "stream": True,
             "streaming_interval": self.streaming_interval_s,
+            "max_tokens": TTS_DEFAULT_MAX_TOKENS,
         }
         generation_options = generation_options or {}
         with self._generation_session(ref_audio_path, ref_text) as (ref_audio_input, active_ref_text):
             generate_kwargs["ref_audio"] = ref_audio_input
+            generate_kwargs["ref_text"] = active_ref_text
             for option_key in ("temperature", "top_p", "repetition_penalty", "top_k", "max_tokens"):
                 if option_key in generation_options and generation_options[option_key] is not None:
                     generate_kwargs[option_key] = generation_options[option_key]
+            stream_started_at = time.monotonic()
             for result in self.model.generate(**generate_kwargs):
+                if time.monotonic() - stream_started_at >= TTS_MAX_STREAM_SECONDS:
+                    print(
+                        f"[TTS] Stopping streamed segment after {TTS_MAX_STREAM_SECONDS:.0f}s: "
+                        f"{english_text!r}"
+                    )
+                    break
                 audio = getattr(result, "audio", None)
                 if audio is None:
                     continue
