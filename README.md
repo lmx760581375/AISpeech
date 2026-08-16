@@ -112,3 +112,17 @@ Practical target:
 | First translated audio heard | 0.9-1.8s |
 
 If you need lower than this consistently, the next thing to optimize is the TTS model and chunking strategy, not ASR.
+
+## MLX TTS Profiling
+
+Profile the warmed voice-clone path before changing the decoder. The command reports median first-audio latency, total generation time, RTF, audio chunk count, and MLX peak memory for several streaming intervals. It can also save a Python call profile and JSON summary for before/after comparisons.
+
+```bash
+conda run -n test python profile_mlx_tts.py \
+  --ref-audio test_ref.wav \
+  --ref-text "参考音频文本" \
+  --profile-out /tmp/qwen3tts.prof \
+  --json-out /tmp/qwen3tts.json
+```
+
+Use `--temperature 0` for repeatable performance comparisons. Lower streaming intervals reduce first-audio latency but increase chunking overhead; the realtime server's default is tuned near the middle of that tradeoff.
