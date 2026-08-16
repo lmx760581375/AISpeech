@@ -59,10 +59,10 @@ Open `http://127.0.0.1:7870/realtime`.
 ## Default Models
 
 - ASR: `mlx-community/Qwen3-ASR-0.6B-bf16`
-- TTS: `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit`
+- TTS: `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit`
 - MT: `qwen3:1.7b` via `ollama`
 
-The default TTS model is the smaller `0.6B` MLX `8bit` port because it is currently the best speed fit for local Apple Silicon voice cloning.
+The default TTS model is the smaller `0.6B` MLX `4bit` port because it is currently the best low-latency fit for local Apple Silicon voice cloning. Use `--tts-model mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit` when prioritizing a small quality margin over speed.
 Voice cloning uses the reference audio and its transcript as Qwen3-TTS ICL conditioning.
 
 ## CLI Example

@@ -99,7 +99,7 @@ def test_tts():
         from mlx_audio.tts.utils import load
         import soundfile as sf
 
-        model_id = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit"
+        model_id = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit"
         print(f"  Loading model from: {model_id}")
         t0 = time.time()
         model = load(model_id, lazy=False)

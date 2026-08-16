@@ -44,6 +44,7 @@ ENGLISH_PUNCTUATION_RE = re.compile(r"(?<=[,.!?;:])\s+")
 ENGLISH_CLAUSE_RE = re.compile(r"\s+(?=(?:and|but|so|then|because|which|that|while|if|when|after|before)\b)", re.IGNORECASE)
 TTS_DEFAULT_MAX_TOKENS = 512
 TTS_MAX_STREAM_SECONDS = 20.0
+DEFAULT_TTS_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit"
 
 
 def resolve_local_model(model_id: str) -> str:
@@ -671,9 +672,9 @@ class TTSModule:
     """English TTS with voice cloning via mlx-audio Qwen3-TTS."""
 
     MODEL_ALIASES = {
-        "Qwen/Qwen3-TTS-12Hz-0.6B-Base": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
+        "Qwen/Qwen3-TTS-12Hz-0.6B-Base": DEFAULT_TTS_MODEL,
         "Qwen/Qwen3-TTS-12Hz-1.7B-Base": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
-        "mlx-qwen3-tts-0.6b": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
+        "mlx-qwen3-tts-0.6b": DEFAULT_TTS_MODEL,
         "mlx-qwen3-tts-1.7b": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
     }
     CUSTOM_VOICE_MODEL_ID = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit"
@@ -790,7 +791,7 @@ class TTSModule:
         },
     ]
 
-    def __init__(self, model_path: str = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit"):
+    def __init__(self, model_path: str = DEFAULT_TTS_MODEL):
         from mlx_audio.tts.utils import load
 
         resolved_model = self.MODEL_ALIASES.get(model_path, model_path)
@@ -1016,7 +1017,7 @@ class SimultaneousTranslator:
         mt_backend: str = "ollama",
         mt_model: Optional[str] = None,
         mt_base_url: Optional[str] = None,
-        tts_model: str = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
+        tts_model: str = DEFAULT_TTS_MODEL,
     ):
         print("\n" + "=" * 56)
         print("Initializing Simultaneous Translator")
@@ -1310,6 +1311,11 @@ def build_parser():
         help="mlx-audio ASR model",
     )
     parser.add_argument(
+        "--tts-model",
+        default=DEFAULT_TTS_MODEL,
+        help="mlx-audio TTS model (4-bit is the low-latency default; 8-bit improves quality)",
+    )
+    parser.add_argument(
         "--mt-backend",
         choices=["mlx", "ollama", "openai"],
         default="ollama",
@@ -1332,6 +1338,7 @@ def main():
         mt_backend=args.mt_backend,
         mt_model=args.mt_model,
         mt_base_url=args.mt_base_url,
+        tts_model=args.tts_model,
     )
 
     if args.ref_audio:

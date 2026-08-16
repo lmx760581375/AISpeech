@@ -61,10 +61,10 @@ def download_mlx_qwen3_tts():
     print("Downloading mlx-audio Qwen3-TTS model...")
     print("=" * 60)
 
+    model_id = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit"
     try:
         from mlx_audio.tts.utils import load
 
-        model_id = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit"
         print(f"Loading {model_id} (will download MLX weights on first run)...")
         model = load(model_id, lazy=False)
         del model
@@ -72,7 +72,7 @@ def download_mlx_qwen3_tts():
     except Exception as e:
         print(f"✗ Failed to download: {e}")
         print("\n  Manual download alternative:")
-        print("    python -c \"from mlx_audio.tts.utils import load; load('mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit', lazy=False)\"")
+        print(f"    python -c \"from mlx_audio.tts.utils import load; load('{model_id}', lazy=False)\"")
 
 
 def main():

@@ -267,7 +267,7 @@ def main():
     parser.add_argument("--ref-text", default="参考音频文本")
     parser.add_argument("--text", action="append", dest="texts", help="Text to benchmark. Can be repeated.")
     parser.add_argument("--output-dir", default="bench_outputs")
-    parser.add_argument("--mlx-model", default="mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit")
+    parser.add_argument("--mlx-model", default="mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit")
     parser.add_argument("--onnx-model-dir", default="")
     parser.add_argument("--onnx-runner", default="")
     parser.add_argument("--json-out", default="")

@@ -184,6 +184,7 @@ def get_translator(args) -> SimultaneousTranslator:
                 mt_backend=args.mt_backend,
                 mt_model=args.mt_model,
                 mt_base_url=args.mt_base_url,
+                tts_model=args.tts_model,
             )
         if getattr(TRANSLATOR.tts, "streaming_interval_s", 0.0) < WEB_TTS_STREAMING_INTERVAL_S:
             TRANSLATOR.tts.streaming_interval_s = WEB_TTS_STREAMING_INTERVAL_S
@@ -560,6 +561,11 @@ def build_parser():
     parser.add_argument("--ref-audio", help="Default reference audio")
     parser.add_argument("--ref-text", default="", help="Default reference transcript")
     parser.add_argument("--asr-model", default="mlx-community/Qwen3-ASR-0.6B-bf16")
+    parser.add_argument(
+        "--tts-model",
+        default="mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit",
+        help="mlx-audio TTS model (4-bit is the low-latency default)",
+    )
     parser.add_argument("--mt-backend", choices=["ollama", "openai"], default="ollama")
     parser.add_argument("--mt-model")
     parser.add_argument("--mt-base-url")
