@@ -70,7 +70,7 @@ def _tts_process_main(model_id: str, streaming_interval_s: float, request_queue,
 
     tts = TTSModule(model_id)
     tts.streaming_interval_s = streaming_interval_s
-    active_ref_audio_path = None
+    active_reference_signature = None
     response_queue.put({"type": "ready"})
 
     while True:
@@ -83,9 +83,10 @@ def _tts_process_main(model_id: str, streaming_interval_s: float, request_queue,
         try:
             ref_audio_path = request["ref_audio_path"]
             ref_text = request.get("ref_text") or ""
-            if ref_audio_path != active_ref_audio_path:
+            reference_signature = request.get("reference_signature") or ref_audio_path
+            if reference_signature != active_reference_signature:
                 tts.create_voice_reference(ref_audio_path, ref_text)
-                active_ref_audio_path = ref_audio_path
+                active_reference_signature = reference_signature
 
             if action == "prepare":
                 response_queue.put({"request_id": request_id, "type": "prepared"})
@@ -95,6 +96,7 @@ def _tts_process_main(model_id: str, streaming_interval_s: float, request_queue,
                 request["english_text"],
                 ref_audio_path,
                 ref_text,
+                generation_options={"max_tokens": request.get("max_tokens", 128)},
             ):
                 response_queue.put(
                     {
@@ -136,6 +138,11 @@ class IsolatedTTSWorker:
         self._response_queue = None
         self._process = None
         self._call_lock = threading.Lock()
+
+    @staticmethod
+    def _reference_signature(ref_audio_path: str, ref_text: str) -> str:
+        digest = hashlib.sha1(Path(ref_audio_path).read_bytes()).hexdigest()
+        return f"{digest}::{ref_text}"
 
     def _start(self):
         self._request_queue = self._ctx.Queue()
@@ -185,6 +192,7 @@ class IsolatedTTSWorker:
         with self._call_lock:
             self._ensure_started()
             request_id = uuid.uuid4().hex
+            reference_signature = self._reference_signature(ref_audio_path, ref_text)
             self._request_queue.put(
                 {
                     "action": "synthesize",
@@ -192,6 +200,8 @@ class IsolatedTTSWorker:
                     "english_text": english_text,
                     "ref_audio_path": ref_audio_path,
                     "ref_text": ref_text,
+                    "reference_signature": reference_signature,
+                    "max_tokens": 128,
                 }
             )
 
@@ -220,6 +230,9 @@ class IsolatedTTSWorker:
                     continue
 
                 response_type = response.get("type")
+                if (time.time() - start_time) > self.total_timeout_s:
+                    self._restart(f"total timeout on text={english_text!r}")
+                    raise TimeoutError("TTS total timeout")
                 if response_type == "chunk":
                     last_message_time = time.time()
                     got_chunk = True
@@ -242,12 +255,14 @@ class IsolatedTTSWorker:
         with self._call_lock:
             self._ensure_started()
             request_id = uuid.uuid4().hex
+            reference_signature = self._reference_signature(ref_audio_path, ref_text)
             self._request_queue.put(
                 {
                     "action": "prepare",
                     "request_id": request_id,
                     "ref_audio_path": ref_audio_path,
                     "ref_text": ref_text,
+                    "reference_signature": reference_signature,
                 }
             )
             start = time.time()
@@ -649,7 +664,7 @@ class RealtimeSession:
         self.ref_text = ref_text
         self.created_at = time.time()
         self.input_queue: queue.Queue = queue.Queue()
-        self.text_queue: queue.Queue = queue.Queue()
+        self.text_queue: queue.Queue = queue.Queue(maxsize=4)
         self.events: Deque[Dict] = collections.deque(maxlen=2000)
         self.event_seq = 0
         self.last_chunk_seq = -1
@@ -693,6 +708,27 @@ class RealtimeSession:
 
     def finalize(self):
         self.input_queue.put(self._INPUT_DONE)
+
+    def _enqueue_text(self, item, *, force: bool = False):
+        if force:
+            while True:
+                try:
+                    self.text_queue.put_nowait(item)
+                    return
+                except queue.Full:
+                    try:
+                        self.text_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+        try:
+            self.text_queue.put_nowait(item)
+        except queue.Full:
+            try:
+                self.text_queue.get_nowait()
+            except queue.Empty:
+                pass
+            self.text_queue.put_nowait(item)
+            append_log("[rt] Dropped stale text unit because TTS was behind input.")
 
     def _record_error(self, label: str, exc: BaseException):
         if self.error is None:
@@ -851,13 +887,13 @@ class RealtimeSession:
                 )
                 for chinese_text in self.committer.ingest(partial_text):
                     for sentence_text, sentence_asr_ms in self.sentence_accumulator.feed(chinese_text, asr_ms):
-                        self.text_queue.put((sentence_text, sentence_asr_ms))
+                        self._enqueue_text((sentence_text, sentence_asr_ms))
 
             for chinese_text in self.committer.finalize():
                 for sentence_text, sentence_asr_ms in self.sentence_accumulator.feed(chinese_text, 0.0):
-                    self.text_queue.put((sentence_text, sentence_asr_ms))
+                    self._enqueue_text((sentence_text, sentence_asr_ms), force=True)
             for sentence_text, sentence_asr_ms in self.sentence_accumulator.finalize():
-                self.text_queue.put((sentence_text, sentence_asr_ms))
+                self._enqueue_text((sentence_text, sentence_asr_ms), force=True)
         except Exception as exc:
             self._record_error("Realtime ASR worker exception", exc)
         finally:
@@ -1058,10 +1094,10 @@ class RealtimeHandler(BaseHTTPRequestHandler):
                 return
 
             translator = get_translator(self.server.args)
-            translator.tts.create_voice_reference(ref_audio_path, "")
+            translator.tts.create_voice_reference(ref_audio_path, ref_text)
 
             session_id = uuid.uuid4().hex
-            session = RealtimeSession(session_id, translator, ref_audio_path, "")
+            session = RealtimeSession(session_id, translator, ref_audio_path, ref_text)
             with SESSIONS_LOCK:
                 SESSIONS[session_id] = session
 
@@ -1130,7 +1166,7 @@ def build_parser():
     parser = argparse.ArgumentParser(description="Realtime simultaneous translation web demo")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7870)
-    parser.add_argument("--window-ms", type=int, default=1400)
+    parser.add_argument("--window-ms", type=int, default=2200)
     parser.add_argument("--hop-ms", type=int, default=1000)
     parser.add_argument("--ref-audio", help="Default reference audio")
     parser.add_argument("--ref-text", default="", help="Default reference transcript")
@@ -1138,6 +1174,7 @@ def build_parser():
     parser.add_argument("--mt-backend", choices=["mlx", "ollama", "openai"], default="ollama")
     parser.add_argument("--mt-model")
     parser.add_argument("--mt-base-url")
+    parser.add_argument("--eager-warmup", action="store_true", help="Load ASR, MT, and TTS before accepting sessions")
     return parser
 
 
@@ -1145,6 +1182,12 @@ def main():
     install_log_capture()
     parser = build_parser()
     args = parser.parse_args()
+    if args.eager_warmup:
+        translator = get_translator(args)
+        tts_worker = get_tts_worker(translator)
+        if args.ref_audio:
+            tts_worker.prepare_reference(args.ref_audio, normalize_reference_text(args.ref_text))
+        print("Realtime models warmed up.")
     port = choose_port(args.host, args.port)
     server = DemoServer((args.host, port), RealtimeHandler, args)
     print("\n" + "=" * 56)

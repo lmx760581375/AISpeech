@@ -628,6 +628,7 @@ class MTModule:
                 "num_ctx": 512,
             },
             think=False,
+            keep_alive=-1,
         )
         return self._cleanup_translation_text(response["message"]["content"])
 
