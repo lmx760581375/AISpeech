@@ -126,3 +126,9 @@ conda run -n test python profile_mlx_tts.py \
 ```
 
 Use `--temperature 0` for repeatable performance comparisons. Lower streaming intervals reduce first-audio latency but increase chunking overhead; the realtime server's default is tuned near the middle of that tradeoff.
+
+`experiment_compiled_code_predictor.py` is a separate MLX experiment for compiling Qwen's fixed 15-codebook prediction chain. It is not used by the web server. With `--temperature 0`, it checks waveform equality against the supported `mlx-audio` path before reporting median latency across several runs:
+
+```bash
+conda run -n test python experiment_compiled_code_predictor.py --runs 3
+```
