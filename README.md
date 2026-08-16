@@ -40,7 +40,7 @@ pip install -r requirements.txt
 python download_models.py
 ollama pull qwen3:1.7b
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python web_demo.py \
-  --ref-audio test_ref.wav --ref-text "参考音频文本" --eager-warmup
+  --ref-audio test_ref.wav --ref-text "参考音频中实际说出的文本" --eager-warmup
 ```
 
 Then open the local page shown in the terminal.
@@ -51,10 +51,27 @@ For the continuous microphone demo, use the realtime entrypoint. `--eager-warmup
 
 ```bash
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python realtime_web_demo.py \
-  --ref-audio test_ref.wav --ref-text "参考音频文本" --eager-warmup
+  --ref-audio test_ref.wav --ref-text "参考音频中实际说出的文本" --eager-warmup
 ```
 
 Open `http://127.0.0.1:7870/realtime`.
+
+## Realtime Regression Loop
+
+`realtime_regression.py` drives the running realtime API with a fixed-seed,
+randomly jittered overlap schedule. It reports Chinese text coverage, per-stage
+P50/P95 latency, queue coalescing, output lag, and basic waveform health. On
+macOS the synthetic fixture creates a known long Chinese speech sample, so it
+can be used for repeatable before/after comparisons:
+
+```bash
+conda run -n test python realtime_regression.py \
+  --synthetic-fixture --pace --json-out /tmp/realtime-regression.json
+```
+
+Use a real reference recording for final listening checks. The automated report
+detects content loss and waveform anomalies, but it cannot prove perceived
+voice similarity or naturalness.
 
 ## Default Models
 

@@ -120,7 +120,27 @@ def split_english_for_tts(text: str, max_words: int = 10, max_chars: int = 56) -
             for index in range(0, len(words), max_words):
                 refined_parts.append(" ".join(words[index : index + max_words]))
 
-    return [part for part in refined_parts if part]
+    # Commas are useful prosody boundaries, but synthesizing every comma-delimited
+    # fragment separately creates audible restarts such as "Hello," on its own.
+    grouped_parts: List[str] = []
+    current = ""
+    for part in refined_parts:
+        part = part.strip()
+        if not part:
+            continue
+        candidate = f"{current} {part}".strip() if current else part
+        if current and (
+            len(candidate) > max_chars
+            or len(candidate.split()) > max_words
+            or re.search(r"[.!?;:]$", current)
+        ):
+            grouped_parts.append(current)
+            current = part
+        else:
+            current = candidate
+    if current:
+        grouped_parts.append(current)
+    return grouped_parts
 
 
 def play_audio(path: str):
@@ -597,7 +617,7 @@ class MTModule:
         """Reject model commentary before it can be sent to the speech synthesizer."""
         cleaned = cls._cleanup_translation_text(text)
         normalized = re.sub(r"\s+", " ", cleaned).strip()
-        if not normalized or len(normalized.split()) > 24:
+        if not normalized or len(normalized.split()) > 48:
             return ""
         meta_patterns = (
             r"\bthe user said\b",
@@ -648,24 +668,28 @@ class MTModule:
             "required": ["translation"],
             "additionalProperties": False,
         }
-        response = ollama.chat(
-            model=self.model,
-            messages=self._translation_messages(chinese_text),
-            format=schema,
-            options={
-                "temperature": 0,
-                "num_predict": 32,
-                "num_ctx": 512,
-            },
-            think=False,
-            keep_alive=-1,
-        )
-        try:
-            body = json.loads(response["message"]["content"])
-            translation = body["translation"]
-        except (KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("ollama returned an invalid structured translation") from exc
-        return self._validate_short_translation(translation)
+        # The normal 32-token limit is enough for a short clause. A coalesced
+        # realtime unit can need more tokens to close the JSON string, so retry
+        # once before treating it as an unusable translation.
+        for max_tokens in (32, 64):
+            response = ollama.chat(
+                model=self.model,
+                messages=self._translation_messages(chinese_text),
+                format=schema,
+                options={
+                    "temperature": 0,
+                    "num_predict": max_tokens,
+                    "num_ctx": 512,
+                },
+                think=False,
+                keep_alive=-1,
+            )
+            try:
+                body = json.loads(response["message"]["content"])
+                return self._validate_short_translation(body["translation"])
+            except (KeyError, TypeError, json.JSONDecodeError):
+                continue
+        return ""
 
     def _translate_openai(self, chinese_text: str) -> str:
         payload = {

@@ -61,14 +61,23 @@ LOG_LOCK = threading.Lock()
 LOG_BUFFER = collections.deque(maxlen=500)
 LOG_SEQ = 0
 SENTENCE_END_CHARS = "，。！？；,.!?;:"
+HARD_SENTENCE_END_CHARS = "。！？；.!?;:"
 MLX_THREAD_LOCK = threading.Lock()
 MLX_PROCESS_LOCK = mp.get_context("spawn").Lock()
+TTS_FIRST_CHUNK_EVENT = mp.get_context("spawn").Event()
 ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
 REPEATED_ASR_TEXT_RE = re.compile(r"(.)\1{7,}")
 REALTIME_TTS_STREAMING_INTERVAL_S = 0.3
 
 
-def _tts_process_main(model_id: str, streaming_interval_s: float, gpu_lock, request_queue, response_queue):
+def _tts_process_main(
+    model_id: str,
+    streaming_interval_s: float,
+    gpu_lock,
+    first_chunk_event,
+    request_queue,
+    response_queue,
+):
     from demo import TTSModule
 
     tts = TTSModule(model_id)
@@ -93,30 +102,57 @@ def _tts_process_main(model_id: str, streaming_interval_s: float, gpu_lock, requ
                 active_reference_signature = reference_signature
 
             if action == "prepare":
+                # Pay the first decoder/prompt setup cost before microphone
+                # capture starts. The generated warmup audio is discarded.
+                warmup_stream = iter(
+                    tts.synthesize_stream(
+                        "Hi.",
+                        ref_audio_path,
+                        ref_text,
+                        generation_options={"max_tokens": 16},
+                    )
+                )
+                try:
+                    with gpu_lock:
+                        next(warmup_stream)
+                except StopIteration:
+                    raise RuntimeError("mlx-audio returned no TTS warmup audio")
+                finally:
+                    close_stream = getattr(warmup_stream, "close", None)
+                    if close_stream:
+                        close_stream()
                 response_queue.put({"request_id": request_id, "type": "prepared"})
                 continue
 
-            audio_stream = iter(tts.synthesize_stream(
-                request["english_text"],
-                ref_audio_path,
-                ref_text,
-                generation_options={"max_tokens": request.get("max_tokens", 128)},
-            ))
-            while True:
-                try:
-                    with gpu_lock:
-                        waveform, sample_rate, is_final_chunk = next(audio_stream)
-                except StopIteration:
-                    break
-                response_queue.put(
-                    {
-                        "request_id": request_id,
-                        "type": "chunk",
-                        "audio_pcm": np.asarray(waveform, dtype=np.float32).tobytes(),
-                        "sample_rate": sample_rate,
-                        "is_final_chunk": bool(is_final_chunk),
-                    }
-                )
+            first_chunk_event.set()
+            try:
+                audio_stream = iter(tts.synthesize_stream(
+                    request["english_text"],
+                    ref_audio_path,
+                    ref_text,
+                    generation_options={"max_tokens": request.get("max_tokens", 128)},
+                ))
+                first_chunk = True
+                while True:
+                    try:
+                        with gpu_lock:
+                            waveform, sample_rate, is_final_chunk = next(audio_stream)
+                    except StopIteration:
+                        break
+                    if first_chunk:
+                        first_chunk_event.clear()
+                        first_chunk = False
+                    response_queue.put(
+                        {
+                            "request_id": request_id,
+                            "type": "chunk",
+                            "audio_pcm": np.asarray(waveform, dtype=np.float32).tobytes(),
+                            "sample_rate": sample_rate,
+                            "is_final_chunk": bool(is_final_chunk),
+                        }
+                    )
+            finally:
+                first_chunk_event.clear()
             response_queue.put({"request_id": request_id, "type": "done"})
         except Exception as exc:
             response_queue.put(
@@ -135,6 +171,7 @@ class IsolatedTTSWorker:
         model_id: str,
         streaming_interval_s: float,
         gpu_lock,
+        first_chunk_event,
         first_chunk_timeout_s: float = 3.5,
         idle_timeout_s: float = 2.5,
         total_timeout_s: float = 12.0,
@@ -142,6 +179,7 @@ class IsolatedTTSWorker:
         self.model_id = model_id
         self.streaming_interval_s = streaming_interval_s
         self._gpu_lock = gpu_lock
+        self._first_chunk_event = first_chunk_event
         self.first_chunk_timeout_s = first_chunk_timeout_s
         self.idle_timeout_s = idle_timeout_s
         self.total_timeout_s = total_timeout_s
@@ -161,7 +199,14 @@ class IsolatedTTSWorker:
         self._response_queue = self._ctx.Queue()
         self._process = self._ctx.Process(
             target=_tts_process_main,
-            args=(self.model_id, self.streaming_interval_s, self._gpu_lock, self._request_queue, self._response_queue),
+            args=(
+                self.model_id,
+                self.streaming_interval_s,
+                self._gpu_lock,
+                self._first_chunk_event,
+                self._request_queue,
+                self._response_queue,
+            ),
             daemon=True,
         )
         self._process.start()
@@ -184,6 +229,7 @@ class IsolatedTTSWorker:
                 return
 
     def _stop(self):
+        self._first_chunk_event.clear()
         if self._process is not None and self._process.is_alive():
             self._process.terminate()
             self._process.join(timeout=1.0)
@@ -312,6 +358,7 @@ def get_tts_worker(translator: SimultaneousTranslator) -> IsolatedTTSWorker:
                 model_id=translator.tts_model_id,
                 streaming_interval_s=REALTIME_TTS_STREAMING_INTERVAL_S,
                 gpu_lock=MLX_PROCESS_LOCK,
+                first_chunk_event=TTS_FIRST_CHUNK_EVENT,
             )
         return TTS_WORKER
 
@@ -493,10 +540,10 @@ class StableChunkCommitter:
 
     def __init__(
         self,
-        flush_chars: int = 12,
-        tail_guard_chars: int = 6,
-        merge_context_chars: int = 28,
-        min_overlap_chars: int = 1,
+        flush_chars: int = 20,
+        tail_guard_chars: int = 10,
+        merge_context_chars: int = 48,
+        min_overlap_chars: int = 2,
     ):
         self.flush_chars = flush_chars
         self.tail_guard_chars = tail_guard_chars
@@ -513,6 +560,22 @@ class StableChunkCommitter:
     def _working_text(self) -> str:
         return self.recent_text + self.pending
 
+    @staticmethod
+    def _punctuation_overlap_end(base: str, fragment: str) -> int:
+        """Find an ASR window overlap while tolerating different boundary punctuation."""
+        ignored = set(SENTENCE_END_CHARS)
+        left = [(char, index) for index, char in enumerate(base) if char not in ignored]
+        right = [(char, index) for index, char in enumerate(fragment) if char not in ignored]
+        max_size = min(len(left), len(right))
+        for size in range(max_size, 0, -1):
+            if [char for char, _ in left[-size:]] != [char for char, _ in right[:size]]:
+                continue
+            # A one-character match is only reliable at a punctuated window seam.
+            if size == 1 and not (base and base[-1] in ignored):
+                continue
+            return right[size - 1][1] + 1
+        return 0
+
     def _merge_fragment(self, fragment: str) -> str:
         base = self._working_text()
         if not base:
@@ -520,7 +583,11 @@ class StableChunkCommitter:
 
         exact_overlap = find_overlap_chars(base, fragment, min_chars=self.min_overlap_chars)
         if exact_overlap > 0:
-            return base + fragment[exact_overlap:]
+            return self._append_overlap_suffix(base, fragment[exact_overlap:])
+
+        punctuation_overlap_end = self._punctuation_overlap_end(base, fragment)
+        if punctuation_overlap_end:
+            return self._append_overlap_suffix(base, fragment[punctuation_overlap_end:])
 
         search_tail = base[-max(self.merge_context_chars, len(fragment)) :]
         if fragment in search_tail:
@@ -533,15 +600,28 @@ class StableChunkCommitter:
 
         return base + fragment
 
+    @staticmethod
+    def _append_overlap_suffix(base: str, suffix: str) -> str:
+        if not base or base[-1] not in SENTENCE_END_CHARS:
+            return base + suffix
+        if suffix and suffix[0] not in SENTENCE_END_CHARS:
+            # The next ASR window extended the final word, so its old period was
+            # a provisional decoder boundary rather than spoken punctuation.
+            return base.rstrip(SENTENCE_END_CHARS) + suffix
+        return base + suffix.lstrip(SENTENCE_END_CHARS)
+
     def _next_commit_index(self, force: bool) -> int:
         if not self.pending:
             return 0
         if force:
             return len(self.pending)
 
+        # A window-ending period is often revised by the next overlapping ASR
+        # result. Keep a short tail after it before exposing the sentence to MT.
+        stable_limit = max(0, len(self.pending) - self.tail_guard_chars)
         last_break = -1
-        for ch in SENTENCE_END_CHARS:
-            last_break = max(last_break, self.pending.rfind(ch))
+        for ch in HARD_SENTENCE_END_CHARS:
+            last_break = max(last_break, self.pending.rfind(ch, 0, stable_limit))
         if last_break >= 0:
             return last_break + 1
 
@@ -599,10 +679,10 @@ class RealtimeSentenceAccumulator:
 
     def __init__(
         self,
-        min_chars: int = 12,
-        force_chars: int = 24,
-        first_min_chars: int = 8,
-        first_force_chars: int = 14,
+        min_chars: int = 16,
+        force_chars: int = 42,
+        first_min_chars: int = 12,
+        first_force_chars: int = 26,
     ):
         self.min_chars = min_chars
         self.force_chars = force_chars
@@ -637,9 +717,9 @@ class RealtimeSentenceAccumulator:
             return True
         if re.search(r"[。！？!?；;]$", text) and len(text) >= min_chars:
             return True
-        if punctuation_count >= 2 and len(text) >= max(6, min_chars - 2):
+        if punctuation_count >= 2 and len(text) >= min_chars:
             return True
-        if re.search(r"[，,]", text) and len(text) >= min_chars + 2:
+        if re.search(r"[，,]", text) and len(text) >= force_chars:
             return True
         return False
 
@@ -684,11 +764,13 @@ class RealtimeSession:
         self.ref_text = ref_text
         self.created_at = time.time()
         self.input_queue: queue.Queue = queue.Queue()
-        self.text_queue: queue.Queue = queue.Queue(maxsize=4)
+        self.text_queue: queue.Queue = queue.Queue()
         self.events: Deque[Dict] = collections.deque(maxlen=2000)
         self.event_seq = 0
         self.last_chunk_seq = -1
         self.segment_index = 0
+        self.max_text_queue_depth = 0
+        self.coalesced_text_units = 0
         self.first_audio_ms: Optional[float] = None
         self.source_cursor_ms = 0
         self.playout_cursor_ms = 0.0
@@ -730,25 +812,8 @@ class RealtimeSession:
         self.input_queue.put(self._INPUT_DONE)
 
     def _enqueue_text(self, item, *, force: bool = False):
-        if force:
-            while True:
-                try:
-                    self.text_queue.put_nowait(item)
-                    return
-                except queue.Full:
-                    try:
-                        self.text_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-        try:
-            self.text_queue.put_nowait(item)
-        except queue.Full:
-            try:
-                self.text_queue.get_nowait()
-            except queue.Empty:
-                pass
-            self.text_queue.put_nowait(item)
-            append_log("[rt] Dropped stale text unit because TTS was behind input.")
+        self.text_queue.put(item)
+        self.max_text_queue_depth = max(self.max_text_queue_depth, self.text_queue.qsize())
 
     def _record_error(self, label: str, exc: BaseException):
         if self.error is None:
@@ -761,6 +826,9 @@ class RealtimeSession:
         if sample_rate != self.translator.asr.sample_rate:
             raise ValueError(f"unexpected sample rate: {sample_rate}")
         t0 = time.time()
+        first_chunk_deadline = t0 + 4.0
+        while TTS_FIRST_CHUNK_EVENT.is_set() and time.time() < first_chunk_deadline:
+            time.sleep(0.01)
         with MLX_THREAD_LOCK:
             with MLX_PROCESS_LOCK:
                 result = self.translator.asr.model.generate(
@@ -774,7 +842,7 @@ class RealtimeSession:
     def _choose_tts_units(self, english_text: str) -> List[str]:
         lag_ms = max(0.0, self.source_cursor_ms - self.playout_cursor_ms)
         if lag_ms > 4000:
-            return split_english_for_tts(english_text, max_words=6, max_chars=36)[:1]
+            return split_english_for_tts(english_text, max_words=8, max_chars=48)
         if lag_ms > 2800:
             return split_english_for_tts(english_text, max_words=8, max_chars=48)
         return split_english_for_tts(english_text, max_words=12, max_chars=72)
@@ -789,6 +857,7 @@ class RealtimeSession:
             english_text = normalize_translation_text(self.translator.mt.translate(chinese_text))
         mt_ms = (time.time() - mt_t0) * 1000
         if not english_text:
+            append_log(f"[rt-mt] Skipped unusable translation: {chinese_text}")
             return
 
         for index, english_unit in enumerate(self._choose_tts_units(english_text)):
@@ -935,7 +1004,26 @@ class RealtimeSession:
                 if self.stop_event.is_set():
                     continue
                 chinese_text, asr_ms = item
+                stop_after_batch = False
+                # When synthesis falls behind, merge queued Chinese units before MT.
+                # This retains every word while reducing repeated MT/TTS startup work.
+                if self.text_queue.qsize() >= 2:
+                    parts = [chinese_text]
+                    while len(parts) < 3 and len("".join(parts)) < 48:
+                        try:
+                            next_item = self.text_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        if next_item is self._TEXT_DONE:
+                            stop_after_batch = True
+                            break
+                        parts.append(next_item[0])
+                    if len(parts) > 1:
+                        chinese_text = "".join(parts)
+                        self.coalesced_text_units += len(parts) - 1
                 self._process_committed_text(chinese_text, asr_ms)
+                if stop_after_batch:
+                    break
         except Exception as exc:
             self._record_error("Realtime TTS worker exception", exc)
 
@@ -968,6 +1056,8 @@ class RealtimeSession:
                         "source_cursor_ms": self.source_cursor_ms,
                         "playout_cursor_ms": self.playout_cursor_ms,
                         "lag_ms": max(0.0, self.source_cursor_ms - self.playout_cursor_ms),
+                        "max_text_queue_depth": self.max_text_queue_depth,
+                        "coalesced_text_units": self.coalesced_text_units,
                     },
                 }
             )
