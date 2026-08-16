@@ -68,8 +68,8 @@
           </div>
         </div>
         <div class="field">
-          <label for="refText">参考音频文本（当前不参与合成）</label>
-          <textarea id="refText" placeholder="可填参考音频真实文本；当前 realtime demo 走 audio-only 克隆，不会把它喂回 TTS"></textarea>
+          <label for="refText">参考音频真实文本（用于音色克隆）</label>
+          <textarea id="refText" placeholder="请填写参考音频中实际说出的完整内容；缺失会显著降低音色匹配和稳定性。"></textarea>
         </div>
         <div class="row2">
           <div class="field">
@@ -496,6 +496,9 @@
       const hopMs = Math.max(300, Number(hopMsInput.value || latestConfig.hop_ms || 1000));
       if (hopMs >= windowMs) {
         throw new Error("hop 必须小于窗口长度");
+      }
+      if (!refText.value.trim()) {
+        throw new Error("请填写参考音频中实际说出的完整文本，用于稳定音色克隆");
       }
       if (refFile) form.append("ref_audio", refFile);
       form.append("ref_text", refText.value || "");

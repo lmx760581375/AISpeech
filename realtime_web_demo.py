@@ -2,7 +2,7 @@
 Realtime simultaneous interpretation demo.
 
 Run:
-    python realtime_web_demo.py --ref-audio test_ref.wav --ref-text "参考音频文本"
+    python realtime_web_demo.py --ref-audio test_ref.wav --ref-text "参考音频中实际说出的文本"
 
 Open:
     http://127.0.0.1:7870/realtime
@@ -61,11 +61,14 @@ LOG_LOCK = threading.Lock()
 LOG_BUFFER = collections.deque(maxlen=500)
 LOG_SEQ = 0
 SENTENCE_END_CHARS = "，。！？；,.!?;:"
-MLX_INFERENCE_LOCK = threading.Lock()
+MLX_THREAD_LOCK = threading.Lock()
+MLX_PROCESS_LOCK = mp.get_context("spawn").Lock()
 ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
+REPEATED_ASR_TEXT_RE = re.compile(r"(.)\1{7,}")
+REALTIME_TTS_STREAMING_INTERVAL_S = 0.3
 
 
-def _tts_process_main(model_id: str, streaming_interval_s: float, request_queue, response_queue):
+def _tts_process_main(model_id: str, streaming_interval_s: float, gpu_lock, request_queue, response_queue):
     from demo import TTSModule
 
     tts = TTSModule(model_id)
@@ -85,19 +88,26 @@ def _tts_process_main(model_id: str, streaming_interval_s: float, request_queue,
             ref_text = request.get("ref_text") or ""
             reference_signature = request.get("reference_signature") or ref_audio_path
             if reference_signature != active_reference_signature:
-                tts.create_voice_reference(ref_audio_path, ref_text)
+                with gpu_lock:
+                    tts.create_voice_reference(ref_audio_path, ref_text)
                 active_reference_signature = reference_signature
 
             if action == "prepare":
                 response_queue.put({"request_id": request_id, "type": "prepared"})
                 continue
 
-            for waveform, sample_rate, is_final_chunk in tts.synthesize_stream(
+            audio_stream = iter(tts.synthesize_stream(
                 request["english_text"],
                 ref_audio_path,
                 ref_text,
                 generation_options={"max_tokens": request.get("max_tokens", 128)},
-            ):
+            ))
+            while True:
+                try:
+                    with gpu_lock:
+                        waveform, sample_rate, is_final_chunk = next(audio_stream)
+                except StopIteration:
+                    break
                 response_queue.put(
                     {
                         "request_id": request_id,
@@ -124,12 +134,14 @@ class IsolatedTTSWorker:
         self,
         model_id: str,
         streaming_interval_s: float,
+        gpu_lock,
         first_chunk_timeout_s: float = 3.5,
         idle_timeout_s: float = 2.5,
         total_timeout_s: float = 12.0,
     ):
         self.model_id = model_id
         self.streaming_interval_s = streaming_interval_s
+        self._gpu_lock = gpu_lock
         self.first_chunk_timeout_s = first_chunk_timeout_s
         self.idle_timeout_s = idle_timeout_s
         self.total_timeout_s = total_timeout_s
@@ -149,7 +161,7 @@ class IsolatedTTSWorker:
         self._response_queue = self._ctx.Queue()
         self._process = self._ctx.Process(
             target=_tts_process_main,
-            args=(self.model_id, self.streaming_interval_s, self._request_queue, self._response_queue),
+            args=(self.model_id, self.streaming_interval_s, self._gpu_lock, self._request_queue, self._response_queue),
             daemon=True,
         )
         self._process.start()
@@ -297,8 +309,9 @@ def get_tts_worker(translator: SimultaneousTranslator) -> IsolatedTTSWorker:
     with TTS_WORKER_LOCK:
         if TTS_WORKER is None:
             TTS_WORKER = IsolatedTTSWorker(
-                model_id=translator.tts.model_id,
-                streaming_interval_s=translator.tts.streaming_interval_s,
+                model_id=translator.tts_model_id,
+                streaming_interval_s=REALTIME_TTS_STREAMING_INTERVAL_S,
+                gpu_lock=MLX_PROCESS_LOCK,
             )
         return TTS_WORKER
 
@@ -414,6 +427,7 @@ def get_translator(args) -> SimultaneousTranslator:
                 mt_model=args.mt_model,
                 mt_base_url=args.mt_base_url,
                 tts_model=args.tts_model,
+                load_tts=False,
             )
         return TRANSLATOR
 
@@ -459,6 +473,11 @@ def normalize_reference_text(raw_text: str) -> str:
     if normalized in placeholder_values:
         return ""
     return text
+
+
+def is_pathological_asr_text(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", text or "")
+    return bool(REPEATED_ASR_TEXT_RE.search(normalized))
 
 
 def find_overlap_chars(left: str, right: str, min_chars: int = 2) -> int:
@@ -742,13 +761,14 @@ class RealtimeSession:
         if sample_rate != self.translator.asr.sample_rate:
             raise ValueError(f"unexpected sample rate: {sample_rate}")
         t0 = time.time()
-        with MLX_INFERENCE_LOCK:
-            result = self.translator.asr.model.generate(
-                samples.astype(np.float32, copy=False),
-                language="zh",
-                stream=False,
-                verbose=False,
-            )
+        with MLX_THREAD_LOCK:
+            with MLX_PROCESS_LOCK:
+                result = self.translator.asr.model.generate(
+                    samples.astype(np.float32, copy=False),
+                    language="zh",
+                    stream=False,
+                    verbose=False,
+                )
         return self.translator.asr._output_text(result), (time.time() - t0) * 1000
 
     def _choose_tts_units(self, english_text: str) -> List[str]:
@@ -762,8 +782,9 @@ class RealtimeSession:
     def _process_committed_text(self, chinese_text: str, asr_ms: float):
         mt_t0 = time.time()
         if self.translator.mt.backend == "mlx":
-            with MLX_INFERENCE_LOCK:
-                english_text = normalize_translation_text(self.translator.mt.translate(chinese_text))
+            with MLX_THREAD_LOCK:
+                with MLX_PROCESS_LOCK:
+                    english_text = normalize_translation_text(self.translator.mt.translate(chinese_text))
         else:
             english_text = normalize_translation_text(self.translator.mt.translate(chinese_text))
         mt_ms = (time.time() - mt_t0) * 1000
@@ -886,6 +907,11 @@ class RealtimeSession:
                         "source_cursor_ms": self.source_cursor_ms,
                     }
                 )
+                if is_pathological_asr_text(partial_text):
+                    append_log(
+                        f"[rt-asr] Discarded pathological repeated output for seq={task.seq}: {partial_text}"
+                    )
+                    continue
                 for chinese_text in self.committer.ingest(partial_text):
                     for sentence_text, sentence_asr_ms in self.sentence_accumulator.feed(chinese_text, asr_ms):
                         self._enqueue_text((sentence_text, sentence_asr_ms))
@@ -980,7 +1006,7 @@ class RealtimeHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/realtime/config":
             payload = {
-                "default_ref_text": self.server.args.ref_text or "",
+                "default_ref_text": normalize_reference_text(self.server.args.ref_text or ""),
                 "default_ref_audio": bool(self.server.args.ref_audio),
                 "window_ms": self.server.args.window_ms,
                 "hop_ms": self.server.args.hop_ms,
@@ -1093,9 +1119,14 @@ class RealtimeHandler(BaseHTTPRequestHandler):
             if not ref_audio_path:
                 self._send_json({"error": "reference audio is required"}, status=HTTPStatus.BAD_REQUEST)
                 return
+            if not ref_text:
+                self._send_json(
+                    {"error": "reference transcript is required for stable voice cloning"},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
 
             translator = get_translator(self.server.args)
-            translator.tts.create_voice_reference(ref_audio_path, ref_text)
 
             session_id = uuid.uuid4().hex
             session = RealtimeSession(session_id, translator, ref_audio_path, ref_text)
@@ -1191,8 +1222,11 @@ def main():
     if args.eager_warmup:
         translator = get_translator(args)
         tts_worker = get_tts_worker(translator)
-        if args.ref_audio:
-            tts_worker.prepare_reference(args.ref_audio, normalize_reference_text(args.ref_text))
+        ref_text = normalize_reference_text(args.ref_text)
+        if args.ref_audio and ref_text:
+            tts_worker.prepare_reference(args.ref_audio, ref_text)
+        elif args.ref_audio:
+            print("[rt-tts] Skipping reference warmup: provide the real reference transcript in the UI.")
         print("Realtime models warmed up.")
     port = choose_port(args.host, args.port)
     server = DemoServer((args.host, port), RealtimeHandler, args)
