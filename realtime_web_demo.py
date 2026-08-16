@@ -651,6 +651,11 @@ class StableChunkCommitter:
         self.pending = merged[len(self.recent_text) :]
         return self._flush_pending(force=False)
 
+    def ingest_disjoint(self, text: str) -> List[str]:
+        """Accept a VAD-delimited utterance that has no sliding-window overlap."""
+        normalized = self._normalize(text)
+        return [normalized] if normalized else []
+
     def finalize(self) -> List[str]:
         return self._flush_pending(force=True)
 
@@ -744,6 +749,57 @@ class RealtimeSentenceAccumulator:
         return self.feed("", self.first_asr_ms, force=True)
 
 
+class SpeechBoundaryBuffer:
+    """Emit sentence-sized audio at pauses, with a bounded no-pause fallback."""
+
+    def __init__(self, sample_rate: int, silence_ms: int = 180, min_ms: int = 900, max_ms: int = 4500):
+        self.sample_rate = sample_rate
+        self.silence_samples = int(sample_rate * silence_ms / 1000)
+        self.min_samples = int(sample_rate * min_ms / 1000)
+        self.max_samples = int(sample_rate * max_ms / 1000)
+        self.samples = np.empty(0, dtype=np.float32)
+
+    def append(self, samples: np.ndarray) -> List[np.ndarray]:
+        if samples.size:
+            self.samples = np.concatenate((self.samples, samples.astype(np.float32, copy=False)))
+        return self._drain(force=False)
+
+    def finalize(self) -> List[np.ndarray]:
+        return self._drain(force=True)
+
+    def _drain(self, force: bool) -> List[np.ndarray]:
+        emitted: List[np.ndarray] = []
+        while len(self.samples) >= self.min_samples:
+            limit = min(len(self.samples), self.max_samples)
+            frame = max(1, int(self.sample_rate * 0.02))
+            rms = np.array([
+                np.sqrt(np.mean(self.samples[index : index + frame] ** 2))
+                for index in range(0, limit, frame)
+            ])
+            silent = rms < 0.008
+            run_start = None
+            boundary = None
+            for index, value in enumerate(silent):
+                if value and run_start is None:
+                    run_start = index
+                if run_start is not None and (not value or index == len(silent) - 1):
+                    run_end = index if not value else index + 1
+                    if run_end * frame >= self.min_samples and (run_end - run_start) * frame >= self.silence_samples:
+                        boundary = min(limit, run_end * frame)
+                        break
+                    run_start = None
+            if boundary is None:
+                if len(self.samples) < self.max_samples and not force:
+                    break
+                boundary = limit
+            emitted.append(self.samples[:boundary])
+            self.samples = self.samples[boundary:]
+        if force and self.samples.size:
+            emitted.append(self.samples)
+            self.samples = np.empty(0, dtype=np.float32)
+        return emitted
+
+
 @dataclass
 class AudioChunkTask:
     seq: int
@@ -757,7 +813,7 @@ class RealtimeSession:
     _INPUT_DONE = object()
     _TEXT_DONE = object()
 
-    def __init__(self, session_id: str, translator: SimultaneousTranslator, ref_audio_path: str, ref_text: str):
+    def __init__(self, session_id: str, translator: SimultaneousTranslator, ref_audio_path: str, ref_text: str, asr_segmentation: str):
         self.session_id = session_id
         self.translator = translator
         self.ref_audio_path = ref_audio_path
@@ -776,6 +832,8 @@ class RealtimeSession:
         self.playout_cursor_ms = 0.0
         self.source_audio: List[np.ndarray] = []
         self.source_sample_rate: Optional[int] = None
+        self.asr_segmentation = asr_segmentation
+        self.speech_buffer: Optional[SpeechBoundaryBuffer] = None
         self.wave_chunks: List[np.ndarray] = []
         self.sample_rate: Optional[int] = None
         self.done = False
@@ -935,7 +993,10 @@ class RealtimeSession:
             current_samples = start_sample
         overlap = max(0, current_samples - start_sample)
         if overlap < len(task.samples):
-            self.source_audio.append(task.samples[overlap:].astype(np.float32, copy=False))
+            appended = task.samples[overlap:].astype(np.float32, copy=False)
+            self.source_audio.append(appended)
+            return appended
+        return np.empty(0, dtype=np.float32)
 
     def _run_finalize_fallback(self):
         if self.segment_index > 0 or not self.source_audio or self.source_sample_rate is None:
@@ -962,28 +1023,34 @@ class RealtimeSession:
                     continue
 
                 self.source_cursor_ms = max(self.source_cursor_ms, task.end_ms)
-                self._append_source_audio(task)
-                partial_text, asr_ms = self._transcribe_chunk(task.samples, task.sample_rate)
-                print(
-                    f"  [rt-asr] seq={task.seq} | source={task.end_ms}ms | "
-                    f"asr={asr_ms:.0f}ms | partial={partial_text}"
-                )
-                self.emit_event(
-                    {
-                        "type": "partial",
-                        "partial": partial_text,
-                        "asr_ms": asr_ms,
-                        "source_cursor_ms": self.source_cursor_ms,
-                    }
-                )
-                if is_pathological_asr_text(partial_text):
-                    append_log(
-                        f"[rt-asr] Discarded pathological repeated output for seq={task.seq}: {partial_text}"
+                appended = self._append_source_audio(task)
+                asr_inputs = [task.samples]
+                if self.asr_segmentation == "vad":
+                    if self.speech_buffer is None:
+                        self.speech_buffer = SpeechBoundaryBuffer(task.sample_rate)
+                    asr_inputs = self.speech_buffer.append(appended)
+                for asr_input in asr_inputs:
+                    partial_text, asr_ms = self._transcribe_chunk(asr_input, task.sample_rate)
+                    print(f"  [rt-asr] seq={task.seq} | source={task.end_ms}ms | asr={asr_ms:.0f}ms | partial={partial_text}")
+                    self.emit_event({"type": "partial", "partial": partial_text, "asr_ms": asr_ms, "source_cursor_ms": self.source_cursor_ms})
+                    if is_pathological_asr_text(partial_text):
+                        append_log(f"[rt-asr] Discarded pathological repeated output for seq={task.seq}: {partial_text}")
+                        continue
+                    committed_texts = (
+                        self.committer.ingest_disjoint(partial_text)
+                        if self.asr_segmentation == "vad"
+                        else self.committer.ingest(partial_text)
                     )
-                    continue
-                for chinese_text in self.committer.ingest(partial_text):
-                    for sentence_text, sentence_asr_ms in self.sentence_accumulator.feed(chinese_text, asr_ms):
-                        self._enqueue_text((sentence_text, sentence_asr_ms))
+                    for chinese_text in committed_texts:
+                        for sentence_text, sentence_asr_ms in self.sentence_accumulator.feed(chinese_text, asr_ms):
+                            self._enqueue_text((sentence_text, sentence_asr_ms))
+
+            if self.speech_buffer is not None:
+                for asr_input in self.speech_buffer.finalize():
+                    partial_text, asr_ms = self._transcribe_chunk(asr_input, self.source_sample_rate)
+                    for chinese_text in self.committer.ingest_disjoint(partial_text):
+                        for sentence_text, sentence_asr_ms in self.sentence_accumulator.feed(chinese_text, asr_ms):
+                            self._enqueue_text((sentence_text, sentence_asr_ms), force=True)
 
             for chinese_text in self.committer.finalize():
                 for sentence_text, sentence_asr_ms in self.sentence_accumulator.feed(chinese_text, 0.0):
@@ -1219,7 +1286,7 @@ class RealtimeHandler(BaseHTTPRequestHandler):
             translator = get_translator(self.server.args)
 
             session_id = uuid.uuid4().hex
-            session = RealtimeSession(session_id, translator, ref_audio_path, ref_text)
+            session = RealtimeSession(session_id, translator, ref_audio_path, ref_text, self.server.args.asr_segmentation)
             with SESSIONS_LOCK:
                 SESSIONS[session_id] = session
 
@@ -1293,6 +1360,7 @@ def build_parser():
     parser.add_argument("--ref-audio", help="Default reference audio")
     parser.add_argument("--ref-text", default="", help="Default reference transcript")
     parser.add_argument("--asr-model", default="mlx-community/Qwen3-ASR-0.6B-bf16")
+    parser.add_argument("--asr-segmentation", choices=["fixed", "vad"], default="fixed")
     parser.add_argument(
         "--tts-model",
         default="mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit",
