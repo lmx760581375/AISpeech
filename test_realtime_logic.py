@@ -1,10 +1,11 @@
 """Fast regression tests for realtime commit logic without loading speech models."""
 
 import unittest
+from unittest.mock import Mock
 
 import numpy as np
 
-from realtime_web_demo import BurstTranscriptBuffer, RealtimeSentenceAccumulator, RealtimeSession
+from realtime_web_demo import BurstTranscriptBuffer, RealtimeSentenceAccumulator, RealtimeSession, TeeStream
 
 
 class RealtimeLogicTests(unittest.TestCase):
@@ -31,6 +32,25 @@ class RealtimeLogicTests(unittest.TestCase):
             )
         )
         self.assertEqual(RealtimeSession._trailing_silence_ms(samples, sample_rate), 800.0)
+
+    def test_closed_log_mirror_does_not_propagate_broken_pipe(self):
+        mirror = Mock()
+        mirror.write.side_effect = BrokenPipeError()
+        stream = TeeStream(mirror)
+
+        self.assertEqual(stream.write("request log\n"), 12)
+        self.assertTrue(stream._mirror_closed)
+        self.assertEqual(stream.write("another log\n"), 12)
+        mirror.write.assert_called_once()
+        stream.flush()
+        mirror.flush.assert_not_called()
+
+    def test_backlog_uses_larger_coalescing_and_tts_units(self):
+        self.assertEqual(RealtimeSession._coalesce_limits(0), (3, 48))
+        self.assertEqual(RealtimeSession._coalesce_limits(4001), (5, 72))
+        self.assertEqual(RealtimeSession._tts_unit_limits(0), (8, 48))
+        self.assertEqual(RealtimeSession._tts_unit_limits(3000), (12, 72))
+        self.assertEqual(RealtimeSession._tts_unit_limits(4001), (16, 96))
 
 
 if __name__ == "__main__":

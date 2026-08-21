@@ -389,15 +389,26 @@ def append_log(message: str):
 class TeeStream:
     def __init__(self, original):
         self.original = original
+        self._mirror_closed = False
 
     def write(self, data):
         if data:
             append_log(data)
-            self.original.write(data)
+            if not self._mirror_closed:
+                try:
+                    self.original.write(data)
+                except BrokenPipeError:
+                    # A detached terminal must not turn HTTP request logging
+                    # into a failed API response. The in-memory log remains.
+                    self._mirror_closed = True
         return len(data or "")
 
     def flush(self):
-        self.original.flush()
+        if not self._mirror_closed:
+            try:
+                self.original.flush()
+            except BrokenPipeError:
+                self._mirror_closed = True
 
 
 def install_log_capture():
@@ -1008,11 +1019,22 @@ class RealtimeSession:
 
     def _choose_tts_units(self, english_text: str) -> List[str]:
         lag_ms = max(0.0, self.source_cursor_ms - self.playout_cursor_ms)
+        max_words, max_chars = self._tts_unit_limits(lag_ms)
+        return split_english_for_tts(english_text, max_words=max_words, max_chars=max_chars)
+
+    @staticmethod
+    def _tts_unit_limits(lag_ms: float) -> tuple[int, int]:
         if lag_ms > 4000:
-            return split_english_for_tts(english_text, max_words=8, max_chars=48)
+            return 16, 96
         if lag_ms > 2800:
-            return split_english_for_tts(english_text, max_words=8, max_chars=48)
-        return split_english_for_tts(english_text, max_words=8, max_chars=48)
+            return 12, 72
+        return 8, 48
+
+    @staticmethod
+    def _coalesce_limits(lag_ms: float) -> tuple[int, int]:
+        if lag_ms > 4000:
+            return 5, 72
+        return 3, 48
 
     def _process_committed_text(self, chinese_text: str, asr_ms: float):
         mt_t0 = time.time()
@@ -1244,9 +1266,11 @@ class RealtimeSession:
                 stop_after_batch = False
                 # When synthesis falls behind, merge queued Chinese units before MT.
                 # This retains every word while reducing repeated MT/TTS startup work.
+                lag_ms = max(0.0, self.source_cursor_ms - self.playout_cursor_ms)
+                max_parts, max_chars = self._coalesce_limits(lag_ms)
                 if self.text_queue.qsize() >= 2:
                     parts = [chinese_text]
-                    while len(parts) < 3 and len("".join(parts)) < 48:
+                    while len(parts) < max_parts and len("".join(parts)) < max_chars:
                         try:
                             next_item = self.text_queue.get_nowait()
                         except queue.Empty:
