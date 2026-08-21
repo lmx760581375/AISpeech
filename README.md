@@ -47,7 +47,7 @@ Then open the local page shown in the terminal.
 
 `download_models.py` is the only step that downloads Hugging Face weights. The web and CLI demos resolve ASR/TTS weights from the local cache and fail fast with a setup message if a model is missing, instead of blocking on a network request. The Ollama Qwen3 integration explicitly disables thinking so its token budget is reserved for the translation.
 
-For the continuous microphone demo, use the realtime entrypoint. `--eager-warmup` moves model startup out of the first session, and the default 2200 ms window / 1000 ms hop favors stable Chinese ASR context:
+For the continuous microphone demo, use the realtime entrypoint. `--eager-warmup` moves model startup out of the first session. The default `burst` mode uses WebRTC VAD to seal a short speech burst after a pause, so ASR partials from the same burst replace each other instead of being concatenated. Use `--asr-segmentation fixed` only to retain the older 2200 ms window / 1000 ms hop behavior:
 
 ```bash
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python realtime_web_demo.py \
@@ -55,6 +55,22 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python realtime_web_demo.py \
 ```
 
 Open `http://127.0.0.1:7870/realtime`.
+
+For lower TTS latency on Apple Silicon, Pocket TTS MLX can be selected for the
+realtime worker while leaving Qwen as the default fallback:
+
+```bash
+conda run -n test python realtime_web_demo.py \
+  --tts-backend pocket-mlx \
+  --ref-audio test_ref.wav --ref-text "参考音频中实际说出的文本" --eager-warmup
+```
+
+Pocket TTS uses the reference waveform for cloning and does not use
+`--ref-text`. Before the first use, accept the terms at
+https://huggingface.co/kyutai/pocket-tts and authenticate a token with gated
+repository access using `hf auth login --force`. The worker keeps both the
+model and the encoded voice state in memory; a changed reference audio is
+encoded once before synthesis resumes.
 
 ## Realtime Regression Loop
 
@@ -81,6 +97,30 @@ voice similarity or naturalness.
 
 The default TTS model is the smaller `0.6B` MLX `4bit` port because it is currently the best low-latency fit for local Apple Silicon voice cloning. Use `--tts-model mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit` when prioritizing a small quality margin over speed.
 Voice cloning uses the reference audio and its transcript as Qwen3-TTS ICL conditioning.
+
+## Optional Qwen3.5 MLX MT
+
+`qwen35-mlx` is an optional low-latency backend for conservative ASR-residual translation. It is not the default: the existing Ollama backend remains the supported baseline.
+
+Install the optional runtime without allowing it to upgrade this project's shared web dependencies:
+
+```bash
+pip install --no-deps "mlx-vlm==0.6.15"
+hf download mlx-community/Qwen3.5-2B-4bit --local-dir models/mt_bench/qwen35-2b-4bit
+```
+
+Run the realtime server with the local model path:
+
+```bash
+python realtime_web_demo.py \
+  --mt-backend qwen35-mlx \
+  --mt-model models/mt_bench/qwen35-2b-4bit \
+  --tts-backend pocket-mlx \
+  --ref-audio test_ref.wav \
+  --ref-text "参考音频实际说出的文本"
+```
+
+The backend is serialized with ASR and TTS through the existing MLX lock. This prevents Metal contention, so its standalone MT latency will be lower than its end-to-end realtime latency.
 
 ## CLI Example
 

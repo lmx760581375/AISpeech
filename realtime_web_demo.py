@@ -68,19 +68,25 @@ TTS_FIRST_CHUNK_EVENT = mp.get_context("spawn").Event()
 ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
 REPEATED_ASR_TEXT_RE = re.compile(r"(.)\1{7,}")
 REALTIME_TTS_STREAMING_INTERVAL_S = 0.3
+AUTO_COMMIT_SILENCE_MS = 600
+AUTO_COMMIT_SILENCE_RMS = 0.004
+BURST_END_SILENCE_MS = 320
+BURST_MAX_DURATION_MS = 5500
+BURST_PARTIAL_INTERVAL_MS = 500
 
 
 def _tts_process_main(
     model_id: str,
+    tts_backend: str,
     streaming_interval_s: float,
     gpu_lock,
     first_chunk_event,
     request_queue,
     response_queue,
 ):
-    from demo import TTSModule
+    from demo import create_tts_module
 
-    tts = TTSModule(model_id)
+    tts = create_tts_module(tts_backend, model_id)
     tts.streaming_interval_s = streaming_interval_s
     active_reference_signature = None
     response_queue.put({"type": "ready"})
@@ -130,7 +136,7 @@ def _tts_process_main(
                     request["english_text"],
                     ref_audio_path,
                     ref_text,
-                    generation_options={"max_tokens": request.get("max_tokens", 128)},
+                    generation_options={"max_tokens": request.get("max_tokens", 48 if tts_backend == "pocket-mlx" else 128)},
                 ))
                 first_chunk = True
                 while True:
@@ -169,6 +175,7 @@ class IsolatedTTSWorker:
     def __init__(
         self,
         model_id: str,
+        tts_backend: str,
         streaming_interval_s: float,
         gpu_lock,
         first_chunk_event,
@@ -177,6 +184,7 @@ class IsolatedTTSWorker:
         total_timeout_s: float = 12.0,
     ):
         self.model_id = model_id
+        self.tts_backend = tts_backend
         self.streaming_interval_s = streaming_interval_s
         self._gpu_lock = gpu_lock
         self._first_chunk_event = first_chunk_event
@@ -201,6 +209,7 @@ class IsolatedTTSWorker:
             target=_tts_process_main,
             args=(
                 self.model_id,
+                self.tts_backend,
                 self.streaming_interval_s,
                 self._gpu_lock,
                 self._first_chunk_event,
@@ -259,7 +268,7 @@ class IsolatedTTSWorker:
                     "ref_audio_path": ref_audio_path,
                     "ref_text": ref_text,
                     "reference_signature": reference_signature,
-                    "max_tokens": 128,
+                    "max_tokens": 48 if self.tts_backend == "pocket-mlx" else 128,
                 }
             )
 
@@ -356,6 +365,7 @@ def get_tts_worker(translator: SimultaneousTranslator) -> IsolatedTTSWorker:
         if TTS_WORKER is None:
             TTS_WORKER = IsolatedTTSWorker(
                 model_id=translator.tts_model_id,
+                tts_backend=translator.tts_backend,
                 streaming_interval_s=REALTIME_TTS_STREAMING_INTERVAL_S,
                 gpu_lock=MLX_PROCESS_LOCK,
                 first_chunk_event=TTS_FIRST_CHUNK_EVENT,
@@ -474,6 +484,7 @@ def get_translator(args) -> SimultaneousTranslator:
                 mt_model=args.mt_model,
                 mt_base_url=args.mt_base_url,
                 tts_model=args.tts_model,
+                tts_backend=args.tts_backend,
                 load_tts=False,
             )
         return TRANSLATOR
@@ -684,9 +695,9 @@ class RealtimeSentenceAccumulator:
 
     def __init__(
         self,
-        min_chars: int = 16,
+        min_chars: int = 8,
         force_chars: int = 42,
-        first_min_chars: int = 12,
+        first_min_chars: int = 6,
         first_force_chars: int = 26,
     ):
         self.min_chars = min_chars
@@ -730,7 +741,7 @@ class RealtimeSentenceAccumulator:
 
     def feed(self, text: str, asr_ms: float, force: bool = False) -> List[tuple[str, float]]:
         text = (text or "").strip()
-        if text in self.FILLER_SET and not force:
+        if text in self.FILLER_SET:
             return []
         if text:
             if not self.parts:
@@ -800,6 +811,100 @@ class SpeechBoundaryBuffer:
         return emitted
 
 
+class BurstVADTracker:
+    """Turn non-overlapping microphone hops into VAD-delimited speech bursts."""
+
+    def __init__(self, sample_rate: int, aggressiveness: int = 2):
+        import webrtcvad
+
+        self.sample_rate = sample_rate
+        self.frame_samples = sample_rate * 20 // 1000
+        self.end_silence_frames = max(1, BURST_END_SILENCE_MS // 20)
+        self.max_samples = sample_rate * BURST_MAX_DURATION_MS // 1000
+        self.vad = webrtcvad.Vad(aggressiveness)
+        self.remainder = np.empty(0, dtype=np.float32)
+        self.pre_roll: Deque[np.ndarray] = collections.deque(maxlen=10)
+        self.active_frames: List[np.ndarray] = []
+        self.active_burst_id: Optional[int] = None
+        self.silent_frames = 0
+        self.next_burst_id = 1
+
+    def _is_speech(self, frame: np.ndarray) -> bool:
+        pcm16 = np.clip(frame, -1.0, 1.0)
+        pcm16 = (pcm16 * 32767.0).astype("<i2", copy=False)
+        return self.vad.is_speech(pcm16.tobytes(), self.sample_rate)
+
+    def _seal(self, reason: str) -> Optional[Tuple[int, np.ndarray, str]]:
+        if self.active_burst_id is None or not self.active_frames:
+            return None
+        burst = np.concatenate(self.active_frames).astype(np.float32, copy=False)
+        burst_id = self.active_burst_id
+        self.active_frames = []
+        self.active_burst_id = None
+        self.silent_frames = 0
+        return burst_id, burst, reason
+
+    def append(self, samples: np.ndarray) -> Tuple[Optional[Tuple[int, np.ndarray]], List[Tuple[int, np.ndarray, str]]]:
+        pending = np.concatenate((self.remainder, samples.astype(np.float32, copy=False)))
+        completed: List[Tuple[int, np.ndarray, str]] = []
+        usable = len(pending) // self.frame_samples * self.frame_samples
+        for offset in range(0, usable, self.frame_samples):
+            frame = pending[offset : offset + self.frame_samples]
+            speech = self._is_speech(frame)
+            if self.active_burst_id is None:
+                self.pre_roll.append(frame)
+                if not speech:
+                    continue
+                self.active_burst_id = self.next_burst_id
+                self.next_burst_id += 1
+                self.active_frames = list(self.pre_roll)
+                self.silent_frames = 0
+                continue
+
+            self.active_frames.append(frame)
+            self.silent_frames = 0 if speech else self.silent_frames + 1
+            if self.silent_frames >= self.end_silence_frames:
+                sealed = self._seal("silence")
+                if sealed is not None:
+                    completed.append(sealed)
+            elif sum(len(item) for item in self.active_frames) >= self.max_samples:
+                sealed = self._seal("max_duration")
+                if sealed is not None:
+                    completed.append(sealed)
+        self.remainder = pending[usable:]
+        active = None
+        if self.active_burst_id is not None and self.active_frames:
+            active = (self.active_burst_id, np.concatenate(self.active_frames).astype(np.float32, copy=False))
+        return active, completed
+
+    def finalize(self) -> List[Tuple[int, np.ndarray, str]]:
+        sealed = self._seal("finalize")
+        return [sealed] if sealed is not None else []
+
+
+class BurstTranscriptBuffer:
+    """Moxin-style transcript state: partials replace an active burst, never concatenate it."""
+
+    def __init__(self):
+        self.active_burst_id: Optional[int] = None
+        self.active_text = ""
+
+    def update(self, burst_id: int, text: str):
+        if self.active_burst_id != burst_id:
+            self.active_burst_id = burst_id
+            self.active_text = ""
+        if text:
+            self.active_text = text.strip()
+
+    def seal(self, burst_id: int) -> str:
+        if self.active_burst_id != burst_id:
+            return ""
+        text = self.active_text.strip()
+        self.active_burst_id = None
+        self.active_text = ""
+        return text
+
+
 @dataclass
 class AudioChunkTask:
     seq: int
@@ -832,8 +937,11 @@ class RealtimeSession:
         self.playout_cursor_ms = 0.0
         self.source_audio: List[np.ndarray] = []
         self.source_sample_rate: Optional[int] = None
-        self.asr_segmentation = asr_segmentation
+        self.asr_segmentation = "burst" if asr_segmentation in {"burst", "vad"} else "fixed"
         self.speech_buffer: Optional[SpeechBoundaryBuffer] = None
+        self.burst_tracker: Optional[BurstVADTracker] = None
+        self.burst_transcript = BurstTranscriptBuffer()
+        self.last_burst_partial_at = 0.0
         self.wave_chunks: List[np.ndarray] = []
         self.sample_rate: Optional[int] = None
         self.done = False
@@ -843,6 +951,7 @@ class RealtimeSession:
         self.stop_event = threading.Event()
         self.committer = StableChunkCommitter()
         self.sentence_accumulator = RealtimeSentenceAccumulator()
+        self.translation_context: Deque[Tuple[str, str]] = collections.deque(maxlen=2)
         self.tts_worker = get_tts_worker(translator)
         self.tts_worker.prepare_reference(ref_audio_path, ref_text)
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -903,20 +1012,23 @@ class RealtimeSession:
             return split_english_for_tts(english_text, max_words=8, max_chars=48)
         if lag_ms > 2800:
             return split_english_for_tts(english_text, max_words=8, max_chars=48)
-        return split_english_for_tts(english_text, max_words=12, max_chars=72)
+        return split_english_for_tts(english_text, max_words=8, max_chars=48)
 
     def _process_committed_text(self, chinese_text: str, asr_ms: float):
         mt_t0 = time.time()
-        if self.translator.mt.backend == "mlx":
+        if self.translator.mt.backend in {"mlx", "qwen35-mlx"}:
             with MLX_THREAD_LOCK:
                 with MLX_PROCESS_LOCK:
-                    english_text = normalize_translation_text(self.translator.mt.translate(chinese_text))
+                    english_text = normalize_translation_text(
+                        self.translator.mt.translate(chinese_text, list(self.translation_context))
+                    )
         else:
-            english_text = normalize_translation_text(self.translator.mt.translate(chinese_text))
+            english_text = normalize_translation_text(self.translator.mt.translate(chinese_text, list(self.translation_context)))
         mt_ms = (time.time() - mt_t0) * 1000
         if not english_text:
             append_log(f"[rt-mt] Skipped unusable translation: {chinese_text}")
             return
+        self.translation_context.append((chinese_text, english_text))
 
         for index, english_unit in enumerate(self._choose_tts_units(english_text)):
             self.segment_index += 1
@@ -998,6 +1110,37 @@ class RealtimeSession:
             return appended
         return np.empty(0, dtype=np.float32)
 
+    @staticmethod
+    def _trailing_silence_ms(samples: np.ndarray, sample_rate: int) -> float:
+        """Measure silence at the newest edge of an overlapping microphone window."""
+        if samples.size == 0:
+            return 0.0
+        frame_samples = max(1, int(sample_rate * 0.02))
+        trailing_samples = 0
+        for end in range(len(samples), 0, -frame_samples):
+            start = max(0, end - frame_samples)
+            frame = samples[start:end]
+            if np.sqrt(np.mean(frame * frame)) >= AUTO_COMMIT_SILENCE_RMS:
+                break
+            trailing_samples += len(frame)
+        return trailing_samples * 1000 / sample_rate
+
+    def _enqueue_committed_texts(self, committed_texts: List[str], asr_ms: float, force: bool = False):
+        for chinese_text in committed_texts:
+            for sentence_text, sentence_asr_ms in self.sentence_accumulator.feed(
+                chinese_text, asr_ms, force=force
+            ):
+                self._enqueue_text((sentence_text, sentence_asr_ms), force=force)
+
+    def _flush_after_silence(self, samples: np.ndarray, sample_rate: int, asr_ms: float):
+        silence_ms = self._trailing_silence_ms(samples, sample_rate)
+        if silence_ms < AUTO_COMMIT_SILENCE_MS:
+            return
+        committed_texts = self.committer.finalize()
+        if committed_texts:
+            append_log(f"[rt-asr] Auto-committing after {silence_ms:.0f}ms silence.")
+            self._enqueue_committed_texts(committed_texts, asr_ms, force=True)
+
     def _run_finalize_fallback(self):
         if self.segment_index > 0 or not self.source_audio or self.source_sample_rate is None:
             return
@@ -1013,6 +1156,20 @@ class RealtimeSession:
         for chinese_text in split_for_simul(full_text, max_chars=30):
             self._process_committed_text(chinese_text, 0.0)
 
+    def _run_burst_asr(self, samples: np.ndarray, sample_rate: int, burst_id: int, final: bool, reason: str = ""):
+        if samples.size < sample_rate * 300 // 1000:
+            return
+        partial_text, asr_ms = self._transcribe_chunk(samples, sample_rate)
+        self.emit_event({"type": "partial", "partial": partial_text, "asr_ms": asr_ms, "source_cursor_ms": self.source_cursor_ms})
+        if is_pathological_asr_text(partial_text):
+            return
+        self.burst_transcript.update(burst_id, partial_text)
+        if final:
+            committed = self.burst_transcript.seal(burst_id)
+            if committed:
+                append_log(f"[rt-asr] Sealed burst={burst_id} reason={reason}: {committed}")
+                self._enqueue_committed_texts([committed], asr_ms, force=True)
+
     def _run_asr_commit(self):
         try:
             while True:
@@ -1024,6 +1181,19 @@ class RealtimeSession:
 
                 self.source_cursor_ms = max(self.source_cursor_ms, task.end_ms)
                 appended = self._append_source_audio(task)
+                if self.asr_segmentation == "burst":
+                    if self.burst_tracker is None:
+                        self.burst_tracker = BurstVADTracker(task.sample_rate)
+                    active, completed = self.burst_tracker.append(appended)
+                    now = time.monotonic()
+                    if active is not None and (now - self.last_burst_partial_at) * 1000 >= BURST_PARTIAL_INTERVAL_MS:
+                        burst_id, burst_audio = active
+                        self._run_burst_asr(burst_audio, task.sample_rate, burst_id, final=False)
+                        self.last_burst_partial_at = now
+                    for burst_id, burst_audio, reason in completed:
+                        self._run_burst_asr(burst_audio, task.sample_rate, burst_id, final=True, reason=reason)
+                    continue
+
                 asr_inputs = [task.samples]
                 if self.asr_segmentation == "vad":
                     if self.speech_buffer is None:
@@ -1041,20 +1211,20 @@ class RealtimeSession:
                         if self.asr_segmentation == "vad"
                         else self.committer.ingest(partial_text)
                     )
-                    for chinese_text in committed_texts:
-                        for sentence_text, sentence_asr_ms in self.sentence_accumulator.feed(chinese_text, asr_ms):
-                            self._enqueue_text((sentence_text, sentence_asr_ms))
+                    self._enqueue_committed_texts(committed_texts, asr_ms)
+                if self.asr_segmentation == "fixed":
+                    self._flush_after_silence(task.samples, task.sample_rate, asr_ms)
 
             if self.speech_buffer is not None:
                 for asr_input in self.speech_buffer.finalize():
                     partial_text, asr_ms = self._transcribe_chunk(asr_input, self.source_sample_rate)
-                    for chinese_text in self.committer.ingest_disjoint(partial_text):
-                        for sentence_text, sentence_asr_ms in self.sentence_accumulator.feed(chinese_text, asr_ms):
-                            self._enqueue_text((sentence_text, sentence_asr_ms), force=True)
+                    self._enqueue_committed_texts(self.committer.ingest_disjoint(partial_text), asr_ms, force=True)
 
-            for chinese_text in self.committer.finalize():
-                for sentence_text, sentence_asr_ms in self.sentence_accumulator.feed(chinese_text, 0.0):
-                    self._enqueue_text((sentence_text, sentence_asr_ms), force=True)
+            if self.burst_tracker is not None and self.source_sample_rate is not None:
+                for burst_id, burst_audio, reason in self.burst_tracker.finalize():
+                    self._run_burst_asr(burst_audio, self.source_sample_rate, burst_id, final=True, reason=reason)
+
+            self._enqueue_committed_texts(self.committer.finalize(), 0.0, force=True)
             for sentence_text, sentence_asr_ms in self.sentence_accumulator.finalize():
                 self._enqueue_text((sentence_text, sentence_asr_ms), force=True)
         except Exception as exc:
@@ -1360,13 +1530,24 @@ def build_parser():
     parser.add_argument("--ref-audio", help="Default reference audio")
     parser.add_argument("--ref-text", default="", help="Default reference transcript")
     parser.add_argument("--asr-model", default="mlx-community/Qwen3-ASR-0.6B-bf16")
-    parser.add_argument("--asr-segmentation", choices=["fixed", "vad"], default="fixed")
+    parser.add_argument(
+        "--asr-segmentation",
+        choices=["fixed", "burst", "vad"],
+        default="burst",
+        help="burst uses VAD-sealed transcripts; vad remains an alias for compatibility",
+    )
     parser.add_argument(
         "--tts-model",
         default="mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit",
         help="mlx-audio TTS model (4-bit is the low-latency default)",
     )
-    parser.add_argument("--mt-backend", choices=["mlx", "ollama", "openai"], default="ollama")
+    parser.add_argument(
+        "--tts-backend",
+        choices=["qwen", "pocket-mlx"],
+        default="qwen",
+        help="TTS backend; pocket-mlx uses Pocket TTS reference-audio cloning",
+    )
+    parser.add_argument("--mt-backend", choices=["mlx", "qwen35-mlx", "ollama", "openai"], default="ollama")
     parser.add_argument("--mt-model")
     parser.add_argument("--mt-base-url")
     parser.add_argument("--eager-warmup", action="store_true", help="Load ASR, MT, and TTS before accepting sessions")
