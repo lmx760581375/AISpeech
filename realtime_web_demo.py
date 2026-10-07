@@ -501,6 +501,21 @@ def get_translator(args) -> SimultaneousTranslator:
         return TRANSLATOR
 
 
+def warmup_mt(translator: SimultaneousTranslator) -> None:
+    """Run one real MT request so model cold-start cost is paid at boot."""
+    started_at = time.perf_counter()
+    try:
+        result = translator.mt.translate("你好。")
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        if result:
+            print(f"[rt-mt] Warmed {translator.mt.backend} in {elapsed_ms:.0f}ms.")
+        else:
+            print(f"[rt-mt] Warmup returned empty output after {elapsed_ms:.0f}ms.")
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        print(f"[rt-mt] Warmup failed after {elapsed_ms:.0f}ms; continuing: {exc}")
+
+
 def encode_pcm_base64(waveform: np.ndarray) -> str:
     pcm = np.asarray(waveform, dtype=np.float32, order="C")
     return base64.b64encode(pcm.tobytes()).decode("ascii")
@@ -1584,6 +1599,7 @@ def main():
     args = parser.parse_args()
     if args.eager_warmup:
         translator = get_translator(args)
+        warmup_mt(translator)
         tts_worker = get_tts_worker(translator)
         ref_text = normalize_reference_text(args.ref_text)
         if args.ref_audio and ref_text:

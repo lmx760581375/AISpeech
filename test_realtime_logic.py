@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import numpy as np
 
-from realtime_web_demo import BurstTranscriptBuffer, RealtimeSentenceAccumulator, RealtimeSession, TeeStream
+from realtime_web_demo import BurstTranscriptBuffer, RealtimeSentenceAccumulator, RealtimeSession, TeeStream, warmup_mt
 
 
 class RealtimeLogicTests(unittest.TestCase):
@@ -44,6 +44,16 @@ class RealtimeLogicTests(unittest.TestCase):
         mirror.write.assert_called_once()
         stream.flush()
         mirror.flush.assert_not_called()
+
+    def test_mt_warmup_calls_translation_and_tolerates_failure(self):
+        translator = Mock()
+        translator.mt.backend = "ollama"
+        translator.mt.translate.return_value = "Hello."
+        warmup_mt(translator)
+        translator.mt.translate.assert_called_once_with("你好。")
+
+        translator.mt.translate.side_effect = RuntimeError("offline")
+        warmup_mt(translator)
 
     def test_backlog_uses_larger_coalescing_and_tts_units(self):
         self.assertEqual(RealtimeSession._coalesce_limits(0), (3, 48))
