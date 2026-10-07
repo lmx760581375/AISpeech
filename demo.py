@@ -657,6 +657,26 @@ class MTModule:
             return ""
         return normalized
 
+    @classmethod
+    def _is_context_echo(
+        cls,
+        translation: str,
+        chinese_text: str,
+        context: Optional[List[Tuple[str, str]]],
+    ) -> bool:
+        """Detect small MT models copying a prior translation into a new turn."""
+        if not translation or not context:
+            return False
+        current_source = re.sub(r"\s+", "", chinese_text or "")
+        output = re.sub(r"\s+", " ", translation).strip().lower()
+        for previous_source, previous_translation in context:
+            if re.sub(r"\s+", "", previous_source or "") == current_source:
+                continue
+            previous = re.sub(r"\s+", " ", previous_translation or "").strip().lower()
+            if previous and (output == previous or previous in output):
+                return True
+        return False
+
     def translate(self, chinese_text: str, context: Optional[List[Tuple[str, str]]] = None) -> str:
         if self.backend == "mlx":
             return self._translate_mlx(chinese_text, context)
@@ -737,28 +757,38 @@ class MTModule:
             "required": ["translation"],
             "additionalProperties": False,
         }
-        # The normal 32-token limit is enough for a short clause. A coalesced
-        # realtime unit can need more tokens to close the JSON string, so retry
-        # once before treating it as an unusable translation.
-        for max_tokens in (32, 64):
-            response = ollama.chat(
-                model=self.model,
-                messages=self._translation_messages(chinese_text, context),
-                format=schema,
-                options={
-                    "temperature": 0,
-                    "num_predict": max_tokens,
-                    "num_ctx": 512,
-                },
-                think=False,
-                keep_alive=-1,
-            )
-            try:
-                body = json.loads(response["message"]["content"])
-                return self._validate_short_translation(body["translation"])
-            except (KeyError, TypeError, json.JSONDecodeError):
-                continue
-        return ""
+        def request(request_context: Optional[List[Tuple[str, str]]]) -> str:
+            # The normal 32-token limit is enough for a short clause. A coalesced
+            # realtime unit can need more tokens to close the JSON string, so retry
+            # once before treating it as an unusable translation.
+            for max_tokens in (32, 64):
+                response = ollama.chat(
+                    model=self.model,
+                    messages=self._translation_messages(chinese_text, request_context),
+                    format=schema,
+                    options={
+                        "temperature": 0,
+                        "num_predict": max_tokens,
+                        "num_ctx": 512,
+                    },
+                    think=False,
+                    keep_alive=-1,
+                )
+                try:
+                    body = json.loads(response["message"]["content"])
+                    candidate = self._validate_short_translation(body["translation"])
+                    if candidate:
+                        return candidate
+                except (KeyError, TypeError, json.JSONDecodeError):
+                    continue
+            return ""
+
+        translation = request(context)
+        if context and self._is_context_echo(translation, chinese_text, context):
+            # Qwen3 1.7B can copy the small context block for short/noisy ASR
+            # fragments. A context-free retry is more reliable than speaking it.
+            translation = request(None)
+        return translation
 
     def _translate_openai(self, chinese_text: str, context: Optional[List[Tuple[str, str]]] = None) -> str:
         payload = {

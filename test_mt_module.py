@@ -44,6 +44,34 @@ class Qwen35MLXTests(unittest.TestCase):
             verbose=False,
         )
 
+    def test_ollama_retries_without_context_when_it_echoes_history(self):
+        ollama = types.ModuleType("ollama")
+        ollama.list = Mock()
+        ollama.chat = Mock(
+            side_effect=[
+                {"message": {"content": '{"translation":"Old translation."}'}},
+                {"message": {"content": '{"translation":"Fresh translation."}'}},
+            ]
+        )
+        with patch.dict(sys.modules, {"ollama": ollama}):
+            module = MTModule(backend="ollama")
+            result = module.translate("新的短句。", [("上一句。", "Old translation.")])
+
+        self.assertEqual(result, "Fresh translation.")
+        self.assertEqual(ollama.chat.call_count, 2)
+        self.assertNotIn("Previous committed context", ollama.chat.call_args_list[1].kwargs["messages"][1]["content"])
+
+    def test_ollama_keeps_context_for_non_echo_translation(self):
+        ollama = types.ModuleType("ollama")
+        ollama.list = Mock()
+        ollama.chat = Mock(return_value={"message": {"content": '{"translation":"Fresh translation."}'}})
+        with patch.dict(sys.modules, {"ollama": ollama}):
+            module = MTModule(backend="ollama")
+            result = module.translate("新的短句。", [("上一句。", "Old translation.")])
+
+        self.assertEqual(result, "Fresh translation.")
+        ollama.chat.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
